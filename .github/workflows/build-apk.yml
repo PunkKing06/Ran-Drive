@@ -25,7 +25,7 @@ jobs:
           sed -i "s/YOUR_GOOGLE_MAPS_API_KEY_HERE/${{ secrets.MAPS_API_KEY }}/" app/src/main/AndroidManifest.xml
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v4 with: gradle-version: '8.9'
 
       - name: Build debug APK
         run: gradle assembleDebug
