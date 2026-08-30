@@ -16,6 +16,11 @@ data class DrivingRoute(
     val polyline: List<LatLng>
 )
 
+sealed class RouteResult {
+    data class Success(val route: DrivingRoute) : RouteResult()
+    data class Failure(val reason: String) : RouteResult()
+}
+
 /**
  * Fetches real, road-following driving routes with turn-by-turn steps from
  * OSRM's public demo server — free, no API key, built on OpenStreetMap data.
@@ -27,7 +32,7 @@ data class DrivingRoute(
  */
 object OsrmClient {
 
-    fun fetchRoute(origin: LatLng, destination: LatLng): DrivingRoute? {
+    fun fetchRoute(origin: LatLng, destination: LatLng): RouteResult {
         return try {
             val url = URL(
                 "https://router.project-osrm.org/route/v1/driving/" +
@@ -38,12 +43,29 @@ object OsrmClient {
             connection.connectTimeout = 8000
             connection.readTimeout = 8000
             connection.requestMethod = "GET"
+            connection.setRequestProperty("User-Agent", "RandomDriveApp/1.0 (Android)")
+
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) {
+                val errorText = try {
+                    connection.errorStream?.bufferedReader()?.use { it.readText() }
+                } catch (e: Exception) {
+                    null
+                }
+                connection.disconnect()
+                return RouteResult.Failure(
+                    "OSRM HTTP $responseCode" + (if (!errorText.isNullOrBlank()) ": ${errorText.take(150)}" else "")
+                )
+            }
 
             val responseText = connection.inputStream.bufferedReader().use { it.readText() }
             connection.disconnect()
 
             val json = JSONObject(responseText)
-            if (json.optString("code") != "Ok") return null
+            val code = json.optString("code", "Unknown")
+            if (code != "Ok") {
+                return RouteResult.Failure("OSRM said \"$code\" — likely no drivable road near one of the two points.")
+            }
 
             val route = json.getJSONArray("routes").getJSONObject(0)
 
@@ -72,9 +94,13 @@ object OsrmClient {
                 }
             }
 
-            if (steps.isEmpty() || polyline.isEmpty()) null else DrivingRoute(steps, polyline)
+            if (steps.isEmpty() || polyline.isEmpty()) {
+                RouteResult.Failure("OSRM returned an empty route")
+            } else {
+                RouteResult.Success(DrivingRoute(steps, polyline))
+            }
         } catch (e: Exception) {
-            null
+            RouteResult.Failure("${e.javaClass.simpleName}: ${e.message}")
         }
     }
 

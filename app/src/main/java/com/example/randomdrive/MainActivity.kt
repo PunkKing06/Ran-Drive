@@ -254,17 +254,18 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
         routeFetchInProgress = true
         Thread {
-            val route = OsrmClient.fetchRoute(origin, destination)
+            val result = OsrmClient.fetchRoute(origin, destination)
             runOnUiThread {
                 routeFetchInProgress = false
-                if (route != null) {
-                    applyNewRoute(route, announce = true)
-                    startDriveLocationUpdates()
-                } else {
-                    Toast.makeText(
-                        this, "Couldn't fetch a route — check your connection and try again.", Toast.LENGTH_LONG
-                    ).show()
-                    stopDrive()
+                when (result) {
+                    is RouteResult.Success -> {
+                        applyNewRoute(result.route, announce = true)
+                        startDriveLocationUpdates()
+                    }
+                    is RouteResult.Failure -> {
+                        Toast.makeText(this, "Couldn't fetch a route: ${result.reason}", Toast.LENGTH_LONG).show()
+                        stopDrive()
+                    }
                 }
             }
         }.start()
@@ -339,16 +340,24 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         routeFetchInProgress = true
         val destination = generateRandomPoint(origin, radiusKm)
         Thread {
-            val newRoute = OsrmClient.fetchRoute(origin, destination)
+            val result = OsrmClient.fetchRoute(origin, destination)
             runOnUiThread {
                 routeFetchInProgress = false
-                if (newRoute != null) {
-                    applyNewRoute(newRoute, announce = toastMessage != null)
-                    if (toastMessage != null) {
-                        Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
+                when (result) {
+                    is RouteResult.Success -> {
+                        applyNewRoute(result.route, announce = toastMessage != null)
+                        if (toastMessage != null) {
+                            Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    is RouteResult.Failure -> {
+                        // Surface it once (arrival/deviation case) but stay quiet on
+                        // routine proactive re-fetches — we'll just retry on the next tick.
+                        if (toastMessage != null) {
+                            Toast.makeText(this, "Reroute failed: ${result.reason}", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
-                // If the fetch failed, we just try again on the next location tick.
             }
         }.start()
     }
