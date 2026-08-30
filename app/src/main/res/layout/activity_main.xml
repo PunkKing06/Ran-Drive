@@ -14,6 +14,54 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <!-- Floats over the top of the map while a drive is active: shows the
+         next up to 3 turns, refreshed automatically as you drive. -->
+    <LinearLayout
+        android:id="@+id/turnListPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:orientation="vertical"
+        android:background="?attr/colorSurface"
+        android:elevation="4dp"
+        android:padding="12dp"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/turn1Text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/turn2Text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textSize="14sp"
+            android:alpha="0.75"
+            android:visibility="gone"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/turn3Text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textSize="14sp"
+            android:alpha="0.55"
+            android:visibility="gone"
+            android:text="" />
+
+    </LinearLayout>
+
     <LinearLayout
         android:id="@+id/controls"
         android:layout_width="match_parent"
@@ -50,7 +98,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:enabled="false"
-            android:text="🧭 Start Driving There" />
+            android:text="🧭 Start Random Drive" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/toiletButton"
@@ -67,7 +115,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:visibility="gone"
-            android:text="⏹ Stop Auto-Reroute" />
+            android:text="⏹ Stop Drive" />
 
     </LinearLayout>
 

@@ -1,14 +1,13 @@
 package com.example.randomdrive
 
 import android.Manifest
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.Location
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.view.View
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -16,7 +15,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
@@ -24,12 +27,14 @@ import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.maps.model.MarkerOptions
+import com.google.android.gms.maps.model.Polyline
 import com.google.android.gms.maps.model.PolylineOptions
 import com.google.android.material.button.MaterialButton
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.Locale
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -39,6 +44,19 @@ import kotlin.random.Random
 
 class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
+    companion object {
+        // How far off the planned route counts as "missed the turn" (or
+        // deliberately went a different way) and triggers a fresh route.
+        private const val DEVIATION_METERS = 60.0
+        // How close to a turn's location counts as having reached it.
+        private const val ARRIVAL_METERS = 30.0
+        // Distance out at which we speak an early warning for the upcoming turn.
+        private const val WARNING_METERS = 150.0
+        // Once fewer than this many steps remain, proactively fetch a
+        // continuation so there's always something upcoming to show.
+        private const val LOW_STEPS_THRESHOLD = 3
+    }
+
     private lateinit var map: GoogleMap
     private lateinit var fusedLocationClient: FusedLocationProviderClient
 
@@ -47,24 +65,31 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var navigateButton: MaterialButton
     private lateinit var toiletButton: MaterialButton
     private lateinit var stopDriveButton: MaterialButton
+    private lateinit var turnListPanel: View
+    private lateinit var turn1Text: TextView
+    private lateinit var turn2Text: TextView
+    private lateinit var turn3Text: TextView
 
     private var currentLocation: LatLng? = null
     private var randomDestination: LatLng? = null
     private var radiusKm = 5.0
+
+    private var textToSpeech: TextToSpeech? = null
+    private var ttsReady = false
+
+    // In-app "random drive" state
     private var isDriveActive = false
+    private var drivingRoute: DrivingRoute? = null
+    private var currentStepIndex = 0
+    private var routeFetchInProgress = false
+    private var hasWarnedForCurrentStep = false
+    private var mapPolyline: Polyline? = null
 
     private val locationPermissionRequestCode = 1001
 
-    // Fired by DriveMonitorService whenever it auto-picks a new random
-    // destination (arrival, or drifting off the current route).
-    private val newDestinationReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val lat = intent.getDoubleExtra(DriveMonitorService.EXTRA_DEST_LAT, 0.0)
-            val lng = intent.getDoubleExtra(DriveMonitorService.EXTRA_DEST_LNG, 0.0)
-            val newDest = LatLng(lat, lng)
-            randomDestination = newDest
-            currentLocation?.let { showDestinationOnMap(it, newDest) }
-            Toast.makeText(this@MainActivity, "New random direction picked!", Toast.LENGTH_SHORT).show()
+    private val driveLocationCallback = object : LocationCallback() {
+        override fun onLocationResult(result: LocationResult) {
+            result.lastLocation?.let { onDriveLocationUpdate(it) }
         }
     }
 
@@ -83,6 +108,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         navigateButton = findViewById(R.id.navigateButton)
         toiletButton = findViewById(R.id.toiletButton)
         stopDriveButton = findViewById(R.id.stopDriveButton)
+        turnListPanel = findViewById(R.id.turnListPanel)
+        turn1Text = findViewById(R.id.turn1Text)
+        turn2Text = findViewById(R.id.turn2Text)
+        turn3Text = findViewById(R.id.turn3Text)
+
+        textToSpeech = TextToSpeech(this) { status ->
+            ttsReady = status == TextToSpeech.SUCCESS
+            if (ttsReady) textToSpeech?.language = Locale.getDefault()
+        }
 
         radiusSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -98,43 +132,17 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             if (origin != null) {
                 val destination = generateRandomPoint(origin, radiusKm)
                 randomDestination = destination
-                showDestinationOnMap(origin, destination)
+                showPreviewOnMap(origin, destination)
                 navigateButton.isEnabled = true
             }
         }
 
-        navigateButton.setOnClickListener {
-            randomDestination?.let { dest ->
-                launchGoogleMapsNavigation(dest)
-                startDriveMonitoring(dest)
-            }
-        }
+        navigateButton.setOnClickListener { startDrive() }
+        stopDriveButton.setOnClickListener { stopDrive() }
 
-        toiletButton.setOnClickListener {
-            findNearestToiletAndNavigate()
-        }
-
-        stopDriveButton.setOnClickListener {
-            stopDriveMonitoring()
-        }
+        toiletButton.setOnClickListener { findNearestToiletAndNavigate() }
 
         requestNeededPermissions()
-    }
-
-    override fun onStart() {
-        super.onStart()
-        val filter = IntentFilter(DriveMonitorService.BROADCAST_NEW_DESTINATION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(newDestinationReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(newDestinationReceiver, filter)
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        unregisterReceiver(newDestinationReceiver)
     }
 
     override fun onMapReady(googleMap: GoogleMap) {
@@ -143,6 +151,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             map.isMyLocationEnabled = true
             fetchCurrentLocation()
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (isDriveActive) stopDriveLocationUpdates()
+        textToSpeech?.stop()
+        textToSpeech?.shutdown()
     }
 
     // ---------- Permissions ----------
@@ -154,15 +169,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     private fun requestNeededPermissions() {
-        val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-        val notGranted = permissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (notGranted.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, notGranted.toTypedArray(), locationPermissionRequestCode)
+        if (!hasLocationPermission()) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), locationPermissionRequestCode
+            )
         }
     }
 
@@ -191,7 +201,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    // ---------- Random destination picking ----------
+    // ---------- Random destination picking (preview, before a drive starts) ----------
 
     /**
      * Picks a random point within [radiusKm] of [origin]: a random bearing
@@ -218,15 +228,177 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         return LatLng(Math.toDegrees(lat2), Math.toDegrees(lon2))
     }
 
-    private fun showDestinationOnMap(origin: LatLng, destination: LatLng) {
+    private fun showPreviewOnMap(origin: LatLng, destination: LatLng) {
         map.clear()
         map.addMarker(MarkerOptions().position(origin).title("You"))
         map.addMarker(MarkerOptions().position(destination).title("Random Destination"))
-        map.addPolyline(PolylineOptions().add(origin, destination).width(6f))
 
         val bounds = LatLngBounds.builder().include(origin).include(destination).build()
         map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 150))
     }
+
+    // ---------- In-app random drive ----------
+
+    private fun startDrive() {
+        val origin = currentLocation ?: return
+        val destination = randomDestination ?: generateRandomPoint(origin, radiusKm)
+
+        isDriveActive = true
+        navigateButton.isEnabled = false
+        randomizeButton.isEnabled = false
+        stopDriveButton.visibility = View.VISIBLE
+        turnListPanel.visibility = View.VISIBLE
+        turn1Text.text = "Finding a route…"
+        turn2Text.visibility = View.GONE
+        turn3Text.visibility = View.GONE
+
+        routeFetchInProgress = true
+        Thread {
+            val route = OsrmClient.fetchRoute(origin, destination)
+            runOnUiThread {
+                routeFetchInProgress = false
+                if (route != null) {
+                    applyNewRoute(route, announce = true)
+                    startDriveLocationUpdates()
+                } else {
+                    Toast.makeText(
+                        this, "Couldn't fetch a route — check your connection and try again.", Toast.LENGTH_LONG
+                    ).show()
+                    stopDrive()
+                }
+            }
+        }.start()
+    }
+
+    private fun stopDrive() {
+        isDriveActive = false
+        stopDriveLocationUpdates()
+        mapPolyline?.remove()
+        mapPolyline = null
+        drivingRoute = null
+        currentStepIndex = 0
+        turnListPanel.visibility = View.GONE
+        stopDriveButton.visibility = View.GONE
+        navigateButton.isEnabled = randomDestination != null
+        randomizeButton.isEnabled = true
+    }
+
+    private fun startDriveLocationUpdates() {
+        if (!hasLocationPermission()) return
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 4000L)
+            .setMinUpdateIntervalMillis(2000L)
+            .build()
+        fusedLocationClient.requestLocationUpdates(request, driveLocationCallback, mainLooper)
+    }
+
+    private fun stopDriveLocationUpdates() {
+        fusedLocationClient.removeLocationUpdates(driveLocationCallback)
+    }
+
+    private fun onDriveLocationUpdate(location: Location) {
+        val here = LatLng(location.latitude, location.longitude)
+        currentLocation = here
+        if (::map.isInitialized) {
+            map.animateCamera(CameraUpdateFactory.newLatLng(here))
+        }
+
+        val route = drivingRoute ?: return
+        if (routeFetchInProgress) return
+
+        // Off-route (missed the turn, or turned off on purpose) -> fresh random route
+        if (minDistanceToPolyline(here, route.polyline) > DEVIATION_METERS) {
+            fetchNewRandomRoute(here, toastMessage = "Off route — new random direction!")
+            return
+        }
+
+        val step = route.steps.getOrNull(currentStepIndex) ?: return
+        val distanceToStep = distanceMeters(here, step.location)
+
+        if (distanceToStep <= ARRIVAL_METERS) {
+            if (step.maneuverType == "arrive" || currentStepIndex >= route.steps.size - 1) {
+                fetchNewRandomRoute(here, toastMessage = "Arrived! Picking a new direction…")
+                return
+            }
+            currentStepIndex++
+            hasWarnedForCurrentStep = false
+            speak(route.steps[currentStepIndex].instruction)
+            updateTurnListUi()
+        } else if (!hasWarnedForCurrentStep && distanceToStep <= WARNING_METERS) {
+            hasWarnedForCurrentStep = true
+            speak("In ${distanceToStep.toInt()} meters, ${step.instruction}")
+        }
+
+        // Running low on upcoming turns -> quietly queue up a continuation
+        if (route.steps.size - currentStepIndex <= LOW_STEPS_THRESHOLD) {
+            fetchNewRandomRoute(here, toastMessage = null)
+        }
+    }
+
+    private fun fetchNewRandomRoute(origin: LatLng, toastMessage: String?) {
+        if (routeFetchInProgress) return
+        routeFetchInProgress = true
+        val destination = generateRandomPoint(origin, radiusKm)
+        Thread {
+            val newRoute = OsrmClient.fetchRoute(origin, destination)
+            runOnUiThread {
+                routeFetchInProgress = false
+                if (newRoute != null) {
+                    applyNewRoute(newRoute, announce = toastMessage != null)
+                    if (toastMessage != null) {
+                        Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
+                    }
+                }
+                // If the fetch failed, we just try again on the next location tick.
+            }
+        }.start()
+    }
+
+    private fun applyNewRoute(route: DrivingRoute, announce: Boolean) {
+        drivingRoute = route
+        currentStepIndex = 0
+        hasWarnedForCurrentStep = false
+        drawRoutePolyline(route.polyline)
+        updateTurnListUi()
+        if (announce) {
+            speak(route.steps.firstOrNull()?.instruction ?: "Let's go")
+        }
+    }
+
+    private fun drawRoutePolyline(points: List<LatLng>) {
+        mapPolyline?.remove()
+        mapPolyline = map.addPolyline(PolylineOptions().addAll(points).width(8f))
+        if (points.isNotEmpty()) {
+            map.animateCamera(CameraUpdateFactory.newLatLngZoom(points.first(), 16f))
+        }
+    }
+
+    private fun updateTurnListUi() {
+        val route = drivingRoute ?: return
+        val upcoming = route.steps.drop(currentStepIndex).take(3)
+        turn1Text.text = upcoming.getOrNull(0)?.instruction ?: ""
+        turn2Text.text = upcoming.getOrNull(1)?.instruction ?: ""
+        turn3Text.text = upcoming.getOrNull(2)?.instruction ?: ""
+        turn2Text.visibility = if (upcoming.size > 1) View.VISIBLE else View.GONE
+        turn3Text.visibility = if (upcoming.size > 2) View.VISIBLE else View.GONE
+    }
+
+    private fun minDistanceToPolyline(point: LatLng, polyline: List<LatLng>): Double {
+        var min = Double.MAX_VALUE
+        for (p in polyline) {
+            val d = distanceMeters(point, p)
+            if (d < min) min = d
+        }
+        return min
+    }
+
+    private fun speak(text: String) {
+        if (ttsReady && text.isNotBlank()) {
+            textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "randomdrive_tts")
+        }
+    }
+
+    // ---------- Nearest toilet (still hands off to Google Maps — a single
+    // real destination is better served by full turn-by-turn + voice) ----------
 
     private fun launchGoogleMapsNavigation(destination: LatLng) {
         val uri = Uri.parse("google.navigation:q=${destination.latitude},${destination.longitude}&mode=d")
@@ -244,40 +416,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    // ---------- Drive monitoring (auto-reroute on missed/changed turn) ----------
-
-    private fun startDriveMonitoring(destination: LatLng) {
-        val intent = Intent(this, DriveMonitorService::class.java).apply {
-            action = DriveMonitorService.ACTION_START
-            putExtra(DriveMonitorService.EXTRA_LAT, destination.latitude)
-            putExtra(DriveMonitorService.EXTRA_LNG, destination.longitude)
-            putExtra(DriveMonitorService.EXTRA_RADIUS_KM, radiusKm)
-        }
-        ContextCompat.startForegroundService(this, intent)
-        isDriveActive = true
-        stopDriveButton.visibility = android.view.View.VISIBLE
-    }
-
-    private fun stopDriveMonitoring() {
-        val intent = Intent(this, DriveMonitorService::class.java).apply {
-            action = DriveMonitorService.ACTION_STOP
-        }
-        startService(intent)
-        isDriveActive = false
-        stopDriveButton.visibility = android.view.View.GONE
-    }
-
-    // ---------- Nearest toilet ----------
-
-    /**
-     * Google's own Places data has no filterable "public restroom" category
-     * (restroom is just a yes/no attribute on other venues, not a place
-     * type), so this uses OpenStreetMap's free Overpass API, which has
-     * purpose-tagged public toilet locations. Picks the closest one and
-     * launches turn-by-turn navigation straight to it. Falls back to a
-     * plain Maps search if nothing turns up nearby (rural areas, or sparse
-     * OSM coverage in some regions).
-     */
     private fun findNearestToiletAndNavigate() {
         val origin = currentLocation
         if (origin == null) {
@@ -356,7 +494,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun distanceMeters(a: LatLng, b: LatLng): Double {
         val results = FloatArray(1)
-        android.location.Location.distanceBetween(a.latitude, a.longitude, b.latitude, b.longitude, results)
+        Location.distanceBetween(a.latitude, a.longitude, b.latitude, b.longitude, results)
         return results[0].toDouble()
     }
 }

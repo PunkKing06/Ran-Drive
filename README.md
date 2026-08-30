@@ -1,45 +1,74 @@
 # Random Drive
 
-An Android app for drivers who just want to go — pick a random direction within
-a radius you choose, and get turn-by-turn driving directions there via Google Maps.
+An Android app for drivers who just want to go — pick a random direction
+within a radius you choose, and get real, in-app turn-by-turn guidance that
+keeps rerouting itself somewhere new, forever, instead of taking you to one
+fixed point and stopping.
 
 ## What it does
 1. Finds your current location on a live embedded Google Map.
-2. Slide to set how far away the random destination can be (1–50 km).
+2. Slide to set how far away each random leg can be (1–50 km).
 3. Tap **"Pick a Random Direction"** — it picks a random bearing and distance
-   within that radius and drops a pin.
-4. Tap **"Start Driving There"** — it launches Google Maps' normal driving
-   navigation to that pin, and starts a background monitor (see below).
-5. Tap **"🚻 Nearest Toilet"** any time — finds and navigates to the closest
-   public restroom.
-6. If you miss a turn (or just feel like going a different way), the app
-   notices and quietly picks a fresh random destination from wherever you
-   ended up, instead of routing you back to the original pin.
+   within that radius and drops a preview pin.
+4. Tap **"Start Random Drive"** — it fetches a real, road-following route to
+   that pin and shows your **next up to 3 turns** in a card over the map,
+   spoken aloud as you approach each one.
+5. As you drive, it keeps itself going: once you're down to your last few
+   turns, it quietly queues up a fresh random continuation so there's always
+   something ahead of you. If you miss a turn (or peel off on purpose), it
+   notices you've left the route and rolls a brand-new random direction from
+   wherever you ended up — same thing on arrival. You never actually "reach"
+   a final destination; it just keeps wandering.
+6. Tap **"🚻 Nearest Toilet"** any time — finds and navigates to the closest
+   public restroom (this one still hands off to Google Maps — see below).
+7. **"⏹ Stop Drive"** ends the session.
 
-### Auto-reroute on a missed (or intentional) turn
-Turn-by-turn navigation itself happens in the real Google Maps app — that's
-what gives you full voice guidance, live traffic, and rerouting for free.
-The catch is that Google Maps, left alone, will just recalculate a new route
-back to the *same* destination if you miss a turn, which isn't very "random
-drive." So this app runs a small foreground service (`DriveMonitorService`)
-while a drive is active: it watches your real GPS position, and if you
-arrive at the destination *or* drift meaningfully away from it, it rolls a
-brand-new random point from your current spot and re-launches navigation to
-that instead. You'll see a persistent notification ("Random Drive is
-active") while this is running, and a **"⏹ Stop Auto-Reroute"** button
-appears in the app to turn it off.
+### In-app turn-by-turn (no hand-off to Google Maps)
+Earlier versions of this app just launched Google Maps' own navigation to a
+single random point — accurate, but it meant one "best route" to one fixed
+destination, not a genuinely random drive. This version instead fetches real
+road-following routes itself, from **OSRM** (Open Source Routing Machine)'s
+free public routing engine — built on OpenStreetMap data, no API key, no
+billing. It parses the turn-by-turn steps OSRM returns (maneuver type,
+street name, location) into plain-language instructions, draws the route on
+the embedded map, and shows the next 3 upcoming turns in a card.
 
-**Honest limitation:** since there's no in-app navigation SDK involved, the
-service only has straight-line distance to work with — not the actual
-road-following route Google Maps is showing you. It infers "you went off
-course" from the fact that your straight-line distance to the target grew
-past your closest approach so far by more than a threshold, for a couple of
-consecutive GPS readings (to filter out normal jitter). On very winding
-roads this can occasionally misfire. Two constants at the top of
-`DriveMonitorService.kt` control the sensitivity:
-- `DEVIATION_THRESHOLD_METERS` (default 400m) — how far past your best
-  approach counts as "drifting away." Raise it if it reroutes too eagerly.
-- `ARRIVAL_THRESHOLD_METERS` (default 60m) — how close counts as "arrived."
+While a drive is active, the app tracks your live GPS position and:
+- **Speaks each upcoming turn** via Android's built-in text-to-speech, with
+  an early "in 150 meters, turn left onto X" warning plus the turn itself
+  as you reach it — so you're not stuck reading the phone screen while
+  driving.
+- **Queues a random continuation** once you're down to your final few
+  upcoming turns, so the route never actually runs out.
+- **Detects a missed or deliberate turn** by checking your live position
+  against the real route polyline (not just straight-line distance to a
+  destination, like an earlier version of this app did) — if you're more
+  than ~60m off the road you were supposed to be on, it fetches a fresh
+  random route from right where you are.
+- **Treats arrival the same as a missed turn** — reaching the destination
+  just triggers picking a new random direction, keeping the drive going.
+
+**Honest limitations:**
+- **Foreground only.** Unlike the old version (which handed off to Google
+  Maps and ran a background service), this tracks your position from inside
+  the app's own screen. If you lock your phone or switch apps, tracking
+  pauses. Keep the app open and the screen on while driving (a dash mount
+  helps).
+- **No live traffic, lane guidance, or speed limits** — those are things
+  Google's own navigation stack does that a hobby project reasonably can't
+  replicate. This is turn-by-turn direction, not a full nav replacement.
+- **OSRM's public demo server** (`router.project-osrm.org`) is meant for
+  light/personal use, not heavy production traffic. Fine for one driver's
+  app; if it ever feels slow or goes down, the fix is self-hosting OSRM or
+  pointing `OsrmClient.kt` at a different OSRM-compatible instance.
+- **Route-deviation detection checks distance to the whole route polyline**,
+  not just the remaining unfinished portion — on a route that loops back
+  near itself, this could rarely under-trigger. Not a big deal for a casual
+  drive, just worth knowing.
+- Tuning constants live at the top of `MainActivity.kt`: `DEVIATION_METERS`
+  (default 60m), `ARRIVAL_METERS` (default 30m), `WARNING_METERS` (default
+  150m — how far out the spoken early warning fires), and
+  `LOW_STEPS_THRESHOLD` (default 3 — how soon it queues a continuation).
 
 ### Nearest toilet
 Google's Places data doesn't actually have a filterable "public restroom"
@@ -143,24 +172,22 @@ not signed for Play Store distribution. If you eventually want to publish
 it, Android Studio can generate a proper signed release build/bundle.
 
 ## Permissions
-Beyond location, the app now also requests:
-- **Notifications** (Android 13+) — for the "Random Drive is active" status
-  notification while auto-reroute monitoring is running.
-- **Foreground service / foreground service location** — manifest-declared,
-  no runtime prompt needed; lets the monitor keep working while Google Maps
-  is the app on screen.
+Just location — that's it. There's no foreground service or notification
+permission anymore, since navigation tracking now happens directly in the
+app's own screen rather than a background service.
 
 ## Notes / things you might want to tweak
 - `minSdk 23` (Android 6.0+) — covers the vast majority of active devices.
-- The random point is **not checked against roads or water** — if you're near
-  a coastline or a lake, you might occasionally get a destination in the
-  water. A cheap improvement: call the Directions API (or the Roads API) to
-  snap the random point to the nearest road before showing it. That needs a
-  billing-enabled key and a network call, so it's left out of this minimal
-  version to keep setup simple.
-- Navigation is handed off to the real Google Maps app via an intent
-  (`google.navigation:q=...`) rather than drawing the route in-app, so you get
-  full turn-by-turn voice guidance, traffic, and rerouting for free.
+- The random point is **not checked against water** before routing to it —
+  OSRM's routing itself will refuse/fail gracefully if a point is
+  unreachable by road (e.g. literally in a lake), which triggers the normal
+  "couldn't fetch a route" retry path rather than crashing, but you may
+  occasionally see a route that looks like it's heading toward a coastline.
+- The nearest-toilet feature still hands off to the real Google Maps app for
+  navigation — a single fixed real destination is better served by Google's
+  full turn-by-turn voice guidance and live traffic than by this app's
+  simpler in-app version, which exists specifically for the open-ended
+  "just keep driving randomly" case.
 - No app icon is bundled — Android Studio will use a default one. Add your
   own via Image Asset Studio (right-click `res` → New → Image Asset) if you
   want a custom one.

@@ -4,9 +4,6 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -27,15 +24,5 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- Watches your live position while a drive is active; if you
-             drift away from the current random destination (missed a turn,
-             or turned off on purpose) it picks a new random destination
-             and re-launches navigation. Runs as a foreground service so it
-             keeps working while Google Maps is the app on screen. -->
-        <service
-            android:name=".DriveMonitorService"
-            android:foregroundServiceType="location"
-            android:exported="false" />
     </application>
 </manifest>
