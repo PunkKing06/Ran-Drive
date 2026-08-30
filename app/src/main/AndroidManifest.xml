@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="true"
+        android:label="Random Drive"
+        android:theme="@style/Theme.RandomDrive">
+
+        <!-- Get a free API key at https://console.cloud.google.com/google/maps-apis
+             and enable "Maps SDK for Android" for your project. -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyB2WB7JZMgeQ6fIxLY_bAWzV7GfodlOcvA" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Watches your live position while a drive is active; if you
+             drift away from the current random destination (missed a turn,
+             or turned off on purpose) it picks a new random destination
+             and re-launches navigation. Runs as a foreground service so it
+             keeps working while Google Maps is the app on screen. -->
+        <service
+            android:name=".DriveMonitorService"
+            android:foregroundServiceType="location"
+            android:exported="false" />
+    </application>
+</manifest>

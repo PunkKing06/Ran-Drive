@@ -1,0 +1,37 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # Keeps your real Maps API key out of the repo. Add it once under
+      # Settings -> Secrets and variables -> Actions -> New repository
+      # secret, named MAPS_API_KEY.
+      - name: Inject Maps API key
+        run: |
+          sed -i "s/YOUR_GOOGLE_MAPS_API_KEY_HERE/${{ secrets.MAPS_API_KEY }}/" app/src/main/AndroidManifest.xml
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RandomDrive-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
