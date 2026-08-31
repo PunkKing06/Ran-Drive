@@ -24,9 +24,8 @@ import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
+import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.LatLngBounds
-import com.google.android.gms.maps.model.MarkerOptions
 import com.google.android.gms.maps.model.Polyline
 import com.google.android.gms.maps.model.PolylineOptions
 import com.google.android.material.button.MaterialButton
@@ -35,33 +34,30 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
-import kotlin.math.asin
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.sqrt
-import kotlin.random.Random
 
 class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     companion object {
-        // How far off the planned route counts as "missed the turn" (or
-        // deliberately went a different way) and triggers a fresh route.
+        // How far off the planned path counts as "left the suggestion" —
+        // expected/normal here, not an error, since the path is just one
+        // random suggestion, not a route you're required to follow.
         private const val DEVIATION_METERS = 60.0
         // How close to a turn's location counts as having reached it.
         private const val ARRIVAL_METERS = 30.0
         // Distance out at which we speak an early warning for the upcoming turn.
         private const val WARNING_METERS = 150.0
-        // Once fewer than this many steps remain, proactively fetch a
-        // continuation so there's always something upcoming to show.
+        // Once fewer than this many steps remain, queue a continuation.
         private const val LOW_STEPS_THRESHOLD = 3
+        // Refetch the local road graph once we've wandered this fraction of
+        // the way to the edge of what was originally fetched.
+        private const val REFETCH_FRACTION = 0.7
     }
 
     private lateinit var map: GoogleMap
     private lateinit var fusedLocationClient: FusedLocationProviderClient
 
     private lateinit var radiusLabel: TextView
-    private lateinit var randomizeButton: MaterialButton
+    private lateinit var controlsPanel: View
     private lateinit var navigateButton: MaterialButton
     private lateinit var toiletButton: MaterialButton
     private lateinit var stopDriveButton: MaterialButton
@@ -71,19 +67,20 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var turn3Text: TextView
 
     private var currentLocation: LatLng? = null
-    private var randomDestination: LatLng? = null
-    private var radiusKm = 5.0
+    private var radiusKm = 3.0
 
     private var textToSpeech: TextToSpeech? = null
     private var ttsReady = false
 
-    // In-app "random drive" state
+    // In-app random-walk drive state
     private var isDriveActive = false
-    private var drivingRoute: DrivingRoute? = null
+    private var roadGraph: RoadGraph? = null
+    private var currentPath: RandomPath? = null
     private var currentStepIndex = 0
     private var routeFetchInProgress = false
     private var hasWarnedForCurrentStep = false
     private var mapPolyline: Polyline? = null
+    private var lastKnownBearing = 0f
 
     private val locationPermissionRequestCode = 1001
 
@@ -103,8 +100,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         mapFragment.getMapAsync(this)
 
         radiusLabel = findViewById(R.id.radiusLabel)
+        controlsPanel = findViewById(R.id.controls)
         val radiusSeekBar = findViewById<SeekBar>(R.id.radiusSeekBar)
-        randomizeButton = findViewById(R.id.randomizeButton)
         navigateButton = findViewById(R.id.navigateButton)
         toiletButton = findViewById(R.id.toiletButton)
         stopDriveButton = findViewById(R.id.stopDriveButton)
@@ -121,25 +118,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         radiusSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 radiusKm = (progress + 1).toDouble()
-                radiusLabel.text = "Max distance: ${radiusKm.toInt()} km"
+                radiusLabel.text = "Explore radius: ${radiusKm.toInt()} km"
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
-        randomizeButton.setOnClickListener {
-            val origin = currentLocation
-            if (origin != null) {
-                val destination = generateRandomPoint(origin, radiusKm)
-                randomDestination = destination
-                showPreviewOnMap(origin, destination)
-                navigateButton.isEnabled = true
-            }
-        }
-
         navigateButton.setOnClickListener { startDrive() }
         stopDriveButton.setOnClickListener { stopDrive() }
-
         toiletButton.setOnClickListener { findNearestToiletAndNavigate() }
 
         requestNeededPermissions()
@@ -201,72 +187,51 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    // ---------- Random destination picking (preview, before a drive starts) ----------
-
-    /**
-     * Picks a random point within [radiusKm] of [origin]: a random bearing
-     * (0-360°) and a random distance. Distance is drawn via sqrt() of a
-     * uniform variable so points spread evenly across the disc's area
-     * instead of clustering near the center.
-     */
-    private fun generateRandomPoint(origin: LatLng, radiusKm: Double): LatLng {
-        val earthRadiusKm = 6371.0
-        val bearingRad = Math.toRadians(Random.nextDouble(0.0, 360.0))
-        val distanceKm = radiusKm * sqrt(Random.nextDouble(0.1, 1.0))
-        val angularDistance = distanceKm / earthRadiusKm
-
-        val lat1 = Math.toRadians(origin.latitude)
-        val lon1 = Math.toRadians(origin.longitude)
-
-        val lat2 = asin(
-            sin(lat1) * cos(angularDistance) + cos(lat1) * sin(angularDistance) * cos(bearingRad)
-        )
-        val lon2 = lon1 + atan2(
-            sin(bearingRad) * sin(angularDistance) * cos(lat1),
-            cos(angularDistance) - sin(lat1) * sin(lat2)
-        )
-        return LatLng(Math.toDegrees(lat2), Math.toDegrees(lon2))
-    }
-
-    private fun showPreviewOnMap(origin: LatLng, destination: LatLng) {
-        map.clear()
-        map.addMarker(MarkerOptions().position(origin).title("You"))
-        map.addMarker(MarkerOptions().position(destination).title("Random Destination"))
-
-        val bounds = LatLngBounds.builder().include(origin).include(destination).build()
-        map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 150))
-    }
-
-    // ---------- In-app random drive ----------
+    // ---------- Starting / stopping a random drive ----------
 
     private fun startDrive() {
-        val origin = currentLocation ?: return
-        val destination = randomDestination ?: generateRandomPoint(origin, radiusKm)
+        val origin = currentLocation
+        if (origin == null) {
+            Toast.makeText(this, "Still finding your location — try again in a moment.", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         isDriveActive = true
-        navigateButton.isEnabled = false
-        randomizeButton.isEnabled = false
+        controlsPanel.visibility = View.GONE
         stopDriveButton.visibility = View.VISIBLE
         turnListPanel.visibility = View.VISIBLE
-        turn1Text.text = "Finding a route…"
+        turn1Text.text = "Scouting nearby roads…"
         turn2Text.visibility = View.GONE
         turn3Text.visibility = View.GONE
 
+        val radiusMeters = (radiusKm * 1000).toInt().coerceAtLeast(500)
         routeFetchInProgress = true
         Thread {
-            val result = OsrmClient.fetchRoute(origin, destination)
+            val graph = OsmRoadGraph.fetchGraph(origin, radiusMeters)
             runOnUiThread {
                 routeFetchInProgress = false
-                when (result) {
-                    is RouteResult.Success -> {
-                        applyNewRoute(result.route, announce = true)
-                        startDriveLocationUpdates()
-                    }
-                    is RouteResult.Failure -> {
-                        Toast.makeText(this, "Couldn't fetch a route: ${result.reason}", Toast.LENGTH_LONG).show()
-                        stopDrive()
-                    }
+                if (graph == null) {
+                    Toast.makeText(
+                        this, "Couldn't load nearby roads — check your connection and try again.", Toast.LENGTH_LONG
+                    ).show()
+                    stopDrive()
+                    return@runOnUiThread
                 }
+                roadGraph = graph
+                val nearest = graph.nearestNode(origin)
+                if (nearest == null) {
+                    Toast.makeText(this, "No mapped roads found nearby.", Toast.LENGTH_LONG).show()
+                    stopDrive()
+                    return@runOnUiThread
+                }
+                val path = OsmRoadGraph.buildRandomPath(graph, nearest, cameFrom = null)
+                if (path.steps.isEmpty()) {
+                    Toast.makeText(this, "Couldn't find a path from here — try a bigger explore radius.", Toast.LENGTH_LONG).show()
+                    stopDrive()
+                    return@runOnUiThread
+                }
+                applyNewPath(path, announce = true)
+                startDriveLocationUpdates()
             }
         }.start()
     }
@@ -276,18 +241,18 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         stopDriveLocationUpdates()
         mapPolyline?.remove()
         mapPolyline = null
-        drivingRoute = null
+        roadGraph = null
+        currentPath = null
         currentStepIndex = 0
         turnListPanel.visibility = View.GONE
         stopDriveButton.visibility = View.GONE
-        navigateButton.isEnabled = randomDestination != null
-        randomizeButton.isEnabled = true
+        controlsPanel.visibility = View.VISIBLE
     }
 
     private fun startDriveLocationUpdates() {
         if (!hasLocationPermission()) return
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 4000L)
-            .setMinUpdateIntervalMillis(2000L)
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 3000L)
+            .setMinUpdateIntervalMillis(1500L)
             .build()
         fusedLocationClient.requestLocationUpdates(request, driveLocationCallback, mainLooper)
     }
@@ -296,65 +261,91 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         fusedLocationClient.removeLocationUpdates(driveLocationCallback)
     }
 
+    // ---------- Live driving loop ----------
+
     private fun onDriveLocationUpdate(location: Location) {
         val here = LatLng(location.latitude, location.longitude)
         currentLocation = here
-        if (::map.isInitialized) {
-            map.animateCamera(CameraUpdateFactory.newLatLng(here))
-        }
+        if (::map.isInitialized) updateNavCamera(location, here)
 
-        val route = drivingRoute ?: return
+        val graph = roadGraph ?: return
+        val path = currentPath ?: return
         if (routeFetchInProgress) return
 
-        // Off-route (missed the turn, or turned off on purpose) -> fresh random route
-        if (minDistanceToPolyline(here, route.polyline) > DEVIATION_METERS) {
-            fetchNewRandomRoute(here, toastMessage = "Off route — new random direction!")
+        // Wandered near the edge of the fetched area -> pull a fresh graph around here
+        if (distanceMetersBetween(here, graph.fetchCenter) > graph.fetchRadiusMeters * REFETCH_FRACTION) {
+            refetchGraphAndContinue(here)
             return
         }
 
-        val step = route.steps.getOrNull(currentStepIndex) ?: return
-        val distanceToStep = distanceMeters(here, step.location)
+        if (path.steps.isEmpty()) {
+            continueRandomPath(here)
+            return
+        }
+
+        // Off the suggested path is normal here (it's a suggestion, not a
+        // required route) -> just quietly continue randomly from here.
+        if (minDistanceToPolyline(here, path.polyline) > DEVIATION_METERS) {
+            continueRandomPath(here)
+            return
+        }
+
+        val step = path.steps.getOrNull(currentStepIndex)
+        if (step == null) {
+            continueRandomPath(here)
+            return
+        }
+        val distanceToStep = distanceMetersBetween(here, step.location)
 
         if (distanceToStep <= ARRIVAL_METERS) {
-            if (step.maneuverType == "arrive" || currentStepIndex >= route.steps.size - 1) {
-                fetchNewRandomRoute(here, toastMessage = "Arrived! Picking a new direction…")
-                return
-            }
             currentStepIndex++
             hasWarnedForCurrentStep = false
-            speak(route.steps[currentStepIndex].instruction)
+            val nextStep = path.steps.getOrNull(currentStepIndex)
+            if (nextStep != null) {
+                speak(nextStep.instruction)
+            }
             updateTurnListUi()
         } else if (!hasWarnedForCurrentStep && distanceToStep <= WARNING_METERS) {
             hasWarnedForCurrentStep = true
             speak("In ${distanceToStep.toInt()} meters, ${step.instruction}")
         }
 
-        // Running low on upcoming turns -> quietly queue up a continuation
-        if (route.steps.size - currentStepIndex <= LOW_STEPS_THRESHOLD) {
-            fetchNewRandomRoute(here, toastMessage = null)
+        if (path.steps.size - currentStepIndex <= LOW_STEPS_THRESHOLD) {
+            continueRandomPath(here)
         }
     }
 
-    private fun fetchNewRandomRoute(origin: LatLng, toastMessage: String?) {
+    private fun continueRandomPath(here: LatLng) {
+        val graph = roadGraph ?: return
         if (routeFetchInProgress) return
         routeFetchInProgress = true
-        val destination = generateRandomPoint(origin, radiusKm)
         Thread {
-            val result = OsrmClient.fetchRoute(origin, destination)
+            val nearest = graph.nearestNode(here)
+            val path = if (nearest != null) OsmRoadGraph.buildRandomPath(graph, nearest, cameFrom = null) else null
             runOnUiThread {
                 routeFetchInProgress = false
-                when (result) {
-                    is RouteResult.Success -> {
-                        applyNewRoute(result.route, announce = toastMessage != null)
-                        if (toastMessage != null) {
-                            Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    is RouteResult.Failure -> {
-                        // Surface it once (arrival/deviation case) but stay quiet on
-                        // routine proactive re-fetches — we'll just retry on the next tick.
-                        if (toastMessage != null) {
-                            Toast.makeText(this, "Reroute failed: ${result.reason}", Toast.LENGTH_LONG).show()
+                if (path != null && path.steps.isNotEmpty()) {
+                    applyNewPath(path, announce = false)
+                }
+            }
+        }.start()
+    }
+
+    private fun refetchGraphAndContinue(here: LatLng) {
+        if (routeFetchInProgress) return
+        routeFetchInProgress = true
+        val radiusMeters = (radiusKm * 1000).toInt().coerceAtLeast(500)
+        Thread {
+            val graph = OsmRoadGraph.fetchGraph(here, radiusMeters)
+            runOnUiThread {
+                routeFetchInProgress = false
+                if (graph != null) {
+                    roadGraph = graph
+                    val nearest = graph.nearestNode(here)
+                    if (nearest != null) {
+                        val path = OsmRoadGraph.buildRandomPath(graph, nearest, cameFrom = null)
+                        if (path.steps.isNotEmpty()) {
+                            applyNewPath(path, announce = false)
                         }
                     }
                 }
@@ -362,28 +353,44 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }.start()
     }
 
-    private fun applyNewRoute(route: DrivingRoute, announce: Boolean) {
-        drivingRoute = route
+    private fun applyNewPath(path: RandomPath, announce: Boolean) {
+        currentPath = path
         currentStepIndex = 0
         hasWarnedForCurrentStep = false
-        drawRoutePolyline(route.polyline)
+        drawRoutePolyline(path.polyline)
         updateTurnListUi()
         if (announce) {
-            speak(route.steps.firstOrNull()?.instruction ?: "Let's go")
+            speak(path.steps.firstOrNull()?.instruction ?: "Let's go")
         }
+    }
+
+    /** Close, tilted, direction-following camera — like a real nav app's driving view. */
+    private fun updateNavCamera(location: Location, here: LatLng) {
+        val bearing: Float = if (location.hasBearing() && location.speed > 1.5f) {
+            location.bearing
+        } else {
+            val nextPoint = currentPath?.polyline?.getOrNull(1)
+            if (nextPoint != null) bearingBetween(here, nextPoint).toFloat() else lastKnownBearing
+        }
+        lastKnownBearing = bearing
+
+        val cameraPosition = CameraPosition.Builder()
+            .target(here)
+            .zoom(18f)
+            .tilt(65f)
+            .bearing(bearing)
+            .build()
+        map.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition), 600, null)
     }
 
     private fun drawRoutePolyline(points: List<LatLng>) {
         mapPolyline?.remove()
         mapPolyline = map.addPolyline(PolylineOptions().addAll(points).width(8f))
-        if (points.isNotEmpty()) {
-            map.animateCamera(CameraUpdateFactory.newLatLngZoom(points.first(), 16f))
-        }
     }
 
     private fun updateTurnListUi() {
-        val route = drivingRoute ?: return
-        val upcoming = route.steps.drop(currentStepIndex).take(3)
+        val path = currentPath ?: return
+        val upcoming = path.steps.drop(currentStepIndex).take(3)
         turn1Text.text = upcoming.getOrNull(0)?.instruction ?: ""
         turn2Text.text = upcoming.getOrNull(1)?.instruction ?: ""
         turn3Text.text = upcoming.getOrNull(2)?.instruction ?: ""
@@ -394,7 +401,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private fun minDistanceToPolyline(point: LatLng, polyline: List<LatLng>): Double {
         var min = Double.MAX_VALUE
         for (p in polyline) {
-            val d = distanceMeters(point, p)
+            val d = distanceMetersBetween(point, p)
             if (d < min) min = d
         }
         return min
@@ -489,7 +496,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                     else -> null
                 } ?: continue
 
-                val distance = distanceMeters(origin, point)
+                val distance = distanceMetersBetween(origin, point)
                 if (distance < nearestDistance) {
                     nearestDistance = distance
                     nearest = point
@@ -499,11 +506,5 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         } catch (e: Exception) {
             null
         }
-    }
-
-    private fun distanceMeters(a: LatLng, b: LatLng): Double {
-        val results = FloatArray(1)
-        Location.distanceBetween(a.latitude, a.longitude, b.latitude, b.longitude, results)
-        return results[0].toDouble()
     }
 }
