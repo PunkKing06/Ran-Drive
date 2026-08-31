@@ -12,17 +12,59 @@ wandering.
 3. Tap **"🎲 Start Random Drive"** — it downloads the real local street
    network around you and starts walking it: a genuinely random real road
    at every intersection, no destination in mind at all.
-4. The screen switches to a close, tilted, direction-following camera view
-   (like Maps/Waze's driving mode) with a card showing your **next up to 3
-   turns**, spoken aloud as you approach each one.
+4. The screen switches to a close, tilted **driving-mode view** — zoomed
+   in, angled down, and rotated to match the direction your phone is
+   physically facing (using the device's compass sensor, not just GPS
+   movement) — with a **car avatar** marking your position and heading, and
+   a card showing your **next up to 3 turns**, spoken aloud as you approach
+   each one.
 5. It never runs out: once you're down to your last few turns, it quietly
    rolls a fresh random continuation. If you don't take the suggested turn
    — on purpose or by missing it — that's completely fine, it just notices
    you've gone a different real way and keeps randomly wandering from
    wherever you actually are.
-6. Tap **"🚻 Nearest Toilet"** any time — finds and navigates to the closest
-   public restroom (this one still hands off to Google Maps — see below).
-7. **"⏹ Stop Drive"** ends the session and brings back the setup panel.
+6. **☰ (top-left)** opens a side menu to pick your car avatar (a few emoji
+   options — sedan, SUV, sports car, taxi, police car, pickup) and to jump
+   to **🚻 Nearest Toilet** any time.
+7. **🎯 (recenter)** appears if you pan the map away from the driving view;
+   tap it to snap back to following your position.
+8. **🔊/🔇 (mute)** toggles the spoken turn announcements on or off.
+9. **"⏹ Stop Drive"** ends the session and brings back the setup panel.
+
+### Driving-mode view
+- **Car avatar**: your live position is shown as a small emoji car marker
+  (whichever you picked in the drawer menu) rotated to match your heading,
+  instead of the plain default blue dot. The built-in "my location" dot is
+  turned off while a drive is active and this custom marker takes over;
+  it comes back for the setup screen's location fix before/after a drive.
+- **Compass-driven camera**: the map's rotation follows the phone's
+  physical compass heading (Android's rotation-vector sensor), not just
+  GPS-derived direction of travel — so it behaves the way it would if you
+  turn the phone itself, and stays accurate even when stopped or moving
+  slowly (GPS-only bearing gets noisy at low speed; a compass doesn't).
+  This is read on a steady ~250ms tick, decoupled from GPS location
+  updates, so the rotation feels smooth rather than jumping only once a
+  second or two.
+- **Recenter**: if you pan or zoom the map manually (common if you want to
+  glance ahead), the camera stops auto-following and a recenter button
+  appears — same pattern as any nav app.
+- **Route styling**: the planned path is drawn as a layered blue line — a
+  soft light-blue outline under a brighter blue core, with rounded joints —
+  matching the look of Google Maps' own route highlighting rather than a
+  thin single-color line.
+
+**Honest limitations on this part:**
+- Emoji car icons are simple 2D glyphs, not real rotating 3D models — most
+  fonts render them as a side-profile car, so spinning them to match
+  heading is a stylized approximation, not a literal perspective-correct
+  rotation. It's meant as a fun cosmetic touch, not a faithful vehicle model.
+- The rotation-vector sensor is present on effectively all modern Android
+  phones, but on the rare device without one, the car marker/camera simply
+  won't rotate (no crash — `startCompassUpdates()` just no-ops if the
+  sensor is unavailable).
+- Compass readings can be temporarily thrown off by nearby magnetic
+  interference (common near large metal objects) — same real-world caveat
+  any compass-based app has.
 
 ### Genuinely random turn-by-turn (not a route to a point)
 Earlier versions of this app either launched Google Maps to one random
