@@ -112,6 +112,7 @@ private fun projectOntoSegment(p: LatLng, a: LatLng, b: LatLng): LatLng {
 }
 
 
+/**
  * Fetches the real local street network from OpenStreetMap (via the free
  * Overpass API — same data source already used for the toilet finder) and
  * does a genuine random walk across it: at every intersection, it picks a
