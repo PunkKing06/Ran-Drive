@@ -64,6 +64,54 @@ fun bearingBetween(a: LatLng, b: LatLng): Double {
 }
 
 /**
+ * Projects [p] onto the closest point that actually lies ON the given
+ * [polyline] (checking every segment, not just the nearest vertex), using a
+ * flat planar approximation local to the segment — accurate enough at
+ * street scale. This is what keeps the car marker centered on the road
+ * itself rather than showing raw, sometimes-noisy GPS position — useful
+ * indoors or anywhere GPS drifts off the actual street.
+ */
+fun snapToPolyline(p: LatLng, polyline: List<LatLng>): LatLng {
+    if (polyline.isEmpty()) return p
+    if (polyline.size == 1) return polyline[0]
+
+    var best = polyline[0]
+    var bestDist = Double.MAX_VALUE
+    for (i in 0 until polyline.size - 1) {
+        val projected = projectOntoSegment(p, polyline[i], polyline[i + 1])
+        val d = distanceMetersBetween(p, projected)
+        if (d < bestDist) {
+            bestDist = d
+            best = projected
+        }
+    }
+    return best
+}
+
+private fun projectOntoSegment(p: LatLng, a: LatLng, b: LatLng): LatLng {
+    // Local planar approximation: scale longitude by cos(latitude) so x/y
+    // are in comparable units near this segment, project, then unscale.
+    val latRef = Math.toRadians(a.latitude)
+    val k = cos(latRef).let { if (it == 0.0) 1.0 else it }
+
+    val ax = a.longitude * k; val ay = a.latitude
+    val bx = b.longitude * k; val by = b.latitude
+    val px = p.longitude * k; val py = p.latitude
+
+    val dx = bx - ax
+    val dy = by - ay
+    val lengthSq = dx * dx + dy * dy
+    if (lengthSq == 0.0) return a
+
+    var t = ((px - ax) * dx + (py - ay) * dy) / lengthSq
+    t = t.coerceIn(0.0, 1.0)
+
+    val projX = ax + t * dx
+    val projY = ay + t * dy
+    return LatLng(projY, projX / k)
+}
+
+
  * Fetches the real local street network from OpenStreetMap (via the free
  * Overpass API — same data source already used for the toilet finder) and
  * does a genuine random walk across it: at every intersection, it picks a

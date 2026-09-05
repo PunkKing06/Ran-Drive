@@ -32,11 +32,34 @@ wandering.
 9. **"⏹ Stop Drive"** ends the session and brings back the setup panel.
 
 ### Driving-mode view
-- **Car avatar**: your live position is shown as a small emoji car marker
-  (whichever you picked in the drawer menu) rotated to match your heading,
-  instead of the plain default blue dot. The built-in "my location" dot is
-  turned off while a drive is active and this custom marker takes over;
-  it comes back for the setup screen's location fix before/after a drive.
+- **Car avatar**: your position is shown as a small car marker — properly
+  drawn (not an emoji), oriented with a clear front/back so it rotates
+  correctly, with a light-to-dark gradient for a glossy look and a soft
+  blurred drop shadow underneath to sell the "sitting above the ground"
+  feel once the tilted camera renders it. The built-in "my location" blue
+  dot is turned off while a drive is active and this marker takes over;
+  it's back for the setup screen's location fix before/after a drive.
+  **This is a flat 2D drawing, not a true 3D model** — the public Google
+  Maps SDK for Android (the only Maps API available to third-party apps)
+  has no API for rendering an actual 3D vehicle as a marker. The rotating
+  3D cars you see in the real Google Maps or Waze apps are rendered by
+  Google's own internal engine, not something exposed to outside
+  developers. If you want a genuinely more realistic look than this
+  drawn icon, the real path forward is supplying actual car sprite/render
+  image assets (yours or a free asset pack) to swap in as the marker
+  bitmap — happy to wire that in if you get some.
+- **Car color picker**: the hamburger drawer lets you choose a body color
+  per "car type" (Sedan, SUV, Sports Car, Taxi, Police Car, Pickup Truck) —
+  shown as a colored swatch next to each name, since relying on emoji
+  glyphs meant inconsistent rendering across phones/fonts.
+- **Road-snapped position**: the marker's on-screen position isn't raw GPS
+  — it's mathematically projected onto the nearest point actually on the
+  current planned road polyline (checking every segment, not just the
+  nearest intersection), so the car always sits centered on the road even
+  when GPS is noisy — indoors, near tall buildings, anywhere accuracy
+  drifts. The *navigation logic* (arrival/deviation detection) still uses
+  your true raw GPS position underneath, so decisions stay based on where
+  you actually are — only the visual marker position is snapped.
 - **Compass-driven camera**: the map's rotation follows the phone's
   physical compass heading (Android's rotation-vector sensor), not just
   GPS-derived direction of travel — so it behaves the way it would if you
@@ -54,10 +77,8 @@ wandering.
   thin single-color line.
 
 **Honest limitations on this part:**
-- Emoji car icons are simple 2D glyphs, not real rotating 3D models — most
-  fonts render them as a side-profile car, so spinning them to match
-  heading is a stylized approximation, not a literal perspective-correct
-  rotation. It's meant as a fun cosmetic touch, not a faithful vehicle model.
+- The car marker is a flat, procedurally-drawn 2D bitmap — see above for
+  why true 3D isn't achievable via the public Maps SDK.
 - The rotation-vector sensor is present on effectively all modern Android
   phones, but on the rare device without one, the car marker/camera simply
   won't rotate (no crash — `startCompassUpdates()` just no-ops if the
@@ -65,6 +86,10 @@ wandering.
 - Compass readings can be temporarily thrown off by nearby magnetic
   interference (common near large metal objects) — same real-world caveat
   any compass-based app has.
+- Road-snapping projects onto the *currently planned* path polyline, not
+  the whole fetched road graph — if you're genuinely off that path (which
+  the app treats as normal, see below), the snap briefly follows whatever
+  the nearest segment of the old path is until a new path is generated.
 
 ### Genuinely random turn-by-turn (not a route to a point)
 Earlier versions of this app either launched Google Maps to one random

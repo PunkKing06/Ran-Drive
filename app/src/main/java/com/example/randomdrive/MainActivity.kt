@@ -4,9 +4,14 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.drawable.GradientDrawable
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -17,6 +22,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.view.Gravity
 import android.view.Surface
 import android.view.View
 import android.widget.LinearLayout
@@ -63,14 +69,16 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         private const val LOW_STEPS_THRESHOLD = 3
         private const val REFETCH_FRACTION = 0.7
         private const val CAMERA_TICK_MS = 250L
+    }
 
-        private val CAR_OPTIONS = listOf(
-            "🚗" to "Sedan",
-            "🚙" to "SUV",
-            "🏎️" to "Sports Car",
-            "🚕" to "Taxi",
-            "🚓" to "Police Car",
-            "🛻" to "Pickup Truck"
+    private val carOptions: List<Pair<Int, String>> by lazy {
+        listOf(
+            Color.parseColor("#1A73E8") to "Sedan",
+            Color.parseColor("#263238") to "SUV",
+            Color.parseColor("#D32F2F") to "Sports Car",
+            Color.parseColor("#FBC02D") to "Taxi",
+            Color.parseColor("#37474F") to "Police Car",
+            Color.parseColor("#607D8B") to "Pickup Truck"
         )
     }
 
@@ -112,7 +120,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     // Car avatar + camera
     private var carMarker: Marker? = null
-    private var selectedCarEmoji = "🚗"
+    private var selectedCarColor = Color.parseColor("#1A73E8")
     private var followingCamera = true
     private var deviceAzimuth = 0f
 
@@ -154,11 +162,18 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private val cameraUpdateHandler = Handler(Looper.getMainLooper())
     private val cameraUpdateRunnable = object : Runnable {
         override fun run() {
-            currentLocation?.let { here ->
-                updateCarMarker(here, deviceAzimuth)
+            currentLocation?.let { rawHere ->
+                val path = currentPath
+                // Snap to the actual road line so the car sits centered on
+                // the street regardless of GPS noise (indoors, multipath, etc).
+                val displayHere = if (path != null && path.polyline.size >= 2) {
+                    snapToPolyline(rawHere, path.polyline)
+                } else rawHere
+
+                updateCarMarker(displayHere, deviceAzimuth)
                 if (followingCamera) {
                     val cameraPosition = CameraPosition.Builder()
-                        .target(here)
+                        .target(displayHere)
                         .zoom(18f)
                         .tilt(65f)
                         .bearing(deviceAzimuth)
@@ -294,34 +309,120 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun setupCarOptionsMenu() {
         carOptionsContainer.removeAllViews()
-        for ((emoji, label) in CAR_OPTIONS) {
-            val row = TextView(this).apply {
-                text = "$emoji  $label"
-                textSize = 16f
+        for ((color, label) in carOptions) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(4, 20, 4, 20)
                 isClickable = true
                 isFocusable = true
-                setOnClickListener {
-                    selectedCarEmoji = emoji
-                    carMarker?.setIcon(BitmapDescriptorFactory.fromBitmap(emojiToBitmap(emoji)))
-                    drawerLayout.closeDrawer(GravityCompat.START)
+            }
+            val swatch = View(this).apply {
+                val size = dpToPx(28)
+                layoutParams = LinearLayout.LayoutParams(size, size)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(color)
                 }
+            }
+            val labelView = TextView(this).apply {
+                text = label
+                textSize = 16f
+                setPadding(dpToPx(12), 0, 0, 0)
+            }
+            row.addView(swatch)
+            row.addView(labelView)
+            row.setOnClickListener {
+                selectedCarColor = color
+                carMarker?.setIcon(BitmapDescriptorFactory.fromBitmap(carBitmap(color)))
+                drawerLayout.closeDrawer(GravityCompat.START)
             }
             carOptionsContainer.addView(row)
         }
     }
 
-    private fun emojiToBitmap(emoji: String, sizePx: Int = 140): Bitmap {
+    private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).toInt()
+
+    /**
+     * Draws a shaded, correctly-oriented car icon (front = top of the
+     * bitmap, matching marker.rotation = heading) rather than a rotating
+     * emoji glyph — proper body shape, a light-to-dark gradient for a
+     * glossy look, headlights/taillights so the front is unambiguous, and
+     * a soft blurred drop shadow underneath. The shadow is what actually
+     * sells the "sitting above the ground" look once the tilted camera
+     * renders this as a flat ground-anchored marker — the same basic trick
+     * real nav-app pucks use. It's a flat drawing, not a true 3D model —
+     * the public Maps SDK for Android has no API for the latter (see README).
+     */
+    private fun carBitmap(bodyColor: Int, sizePx: Int = 160): Bitmap {
         val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = sizePx * 0.75f
-            textAlign = Paint.Align.CENTER
+        val cx = sizePx / 2f
+        val cy = sizePx / 2f
+        val carWidth = sizePx * 0.42f
+        val carHeight = sizePx * 0.72f
+        val corner = carWidth * 0.35f
+
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(90, 0, 0, 0)
+            maskFilter = BlurMaskFilter(sizePx * 0.08f, BlurMaskFilter.Blur.NORMAL)
         }
-        val metrics = paint.fontMetrics
-        val yPos = sizePx / 2f - (metrics.ascent + metrics.descent) / 2f
-        canvas.drawText(emoji, sizePx / 2f, yPos, paint)
+        canvas.drawOval(
+            RectF(cx - carWidth * 0.55f, cy - carHeight * 0.28f, cx + carWidth * 0.55f, cy + carHeight * 0.62f),
+            shadowPaint
+        )
+
+        val bodyRect = RectF(cx - carWidth / 2f, cy - carHeight / 2f, cx + carWidth / 2f, cy + carHeight / 2f)
+
+        val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                bodyRect.left, bodyRect.top, bodyRect.right, bodyRect.bottom,
+                lightenColor(bodyColor, 0.35f), darkenColor(bodyColor, 0.25f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRoundRect(bodyRect, corner, corner, bodyPaint)
+
+        val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = sizePx * 0.02f
+            color = Color.argb(120, 0, 0, 0)
+        }
+        canvas.drawRoundRect(bodyRect, corner, corner, outlinePaint)
+
+        // Windshield near the "front" (top of the bitmap) — matches the
+        // rotation=bearing convention so it always faces the direction of travel.
+        val windshieldPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(210, 30, 40, 55) }
+        val windshieldRect = RectF(
+            bodyRect.left + carWidth * 0.14f, bodyRect.top + carHeight * 0.12f,
+            bodyRect.right - carWidth * 0.14f, bodyRect.top + carHeight * 0.38f
+        )
+        canvas.drawRoundRect(windshieldRect, corner * 0.6f, corner * 0.6f, windshieldPaint)
+
+        val lightRadius = carWidth * 0.09f
+        val headlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#FFF9C4") }
+        canvas.drawCircle(bodyRect.left + lightRadius * 1.3f, bodyRect.top + lightRadius * 1.3f, lightRadius, headlightPaint)
+        canvas.drawCircle(bodyRect.right - lightRadius * 1.3f, bodyRect.top + lightRadius * 1.3f, lightRadius, headlightPaint)
+
+        val taillightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#E53935") }
+        canvas.drawCircle(bodyRect.left + lightRadius * 1.3f, bodyRect.bottom - lightRadius * 1.3f, lightRadius * 0.8f, taillightPaint)
+        canvas.drawCircle(bodyRect.right - lightRadius * 1.3f, bodyRect.bottom - lightRadius * 1.3f, lightRadius * 0.8f, taillightPaint)
+
         return bitmap
+    }
+
+    private fun lightenColor(color: Int, factor: Float): Int {
+        val r = (Color.red(color) + (255 - Color.red(color)) * factor).toInt().coerceIn(0, 255)
+        val g = (Color.green(color) + (255 - Color.green(color)) * factor).toInt().coerceIn(0, 255)
+        val b = (Color.blue(color) + (255 - Color.blue(color)) * factor).toInt().coerceIn(0, 255)
+        return Color.rgb(r, g, b)
+    }
+
+    private fun darkenColor(color: Int, factor: Float): Int {
+        val r = (Color.red(color) * (1 - factor)).toInt().coerceIn(0, 255)
+        val g = (Color.green(color) * (1 - factor)).toInt().coerceIn(0, 255)
+        val b = (Color.blue(color) * (1 - factor)).toInt().coerceIn(0, 255)
+        return Color.rgb(r, g, b)
     }
 
     private fun updateCarMarker(position: LatLng, bearing: Float) {
@@ -330,7 +431,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             carMarker = map.addMarker(
                 MarkerOptions()
                     .position(position)
-                    .icon(BitmapDescriptorFactory.fromBitmap(emojiToBitmap(selectedCarEmoji)))
+                    .icon(BitmapDescriptorFactory.fromBitmap(carBitmap(selectedCarColor)))
                     .anchor(0.5f, 0.5f)
                     .flat(true)
                     .rotation(bearing)
