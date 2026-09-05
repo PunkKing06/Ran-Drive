@@ -48,6 +48,7 @@ import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.JointType
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.MapStyleOptions
 import com.google.android.gms.maps.model.Marker
 import com.google.android.gms.maps.model.MarkerOptions
 import com.google.android.gms.maps.model.Polyline
@@ -59,6 +60,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
+import kotlin.math.cos
+import kotlin.math.ln
 
 class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -116,7 +119,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private var routeFetchInProgress = false
     private var hasWarnedForCurrentStep = false
     private var mapPolyline: Polyline? = null
-    private var mapPolylineOutline: Polyline? = null
+    private val glowPolylines = mutableListOf<Polyline>()
 
     // Car avatar + camera
     private var carMarker: Marker? = null
@@ -172,17 +175,50 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 updateCarMarker(displayHere, deviceAzimuth)
                 if (followingCamera) {
-                    val cameraPosition = CameraPosition.Builder()
-                        .target(displayHere)
-                        .zoom(18f)
-                        .tilt(65f)
-                        .bearing(deviceAzimuth)
-                        .build()
-                    map.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition), CAMERA_TICK_MS.toInt(), null)
+                    map.animateCamera(
+                        CameraUpdateFactory.newCameraPosition(computeNavCameraPosition(displayHere, deviceAzimuth)),
+                        CAMERA_TICK_MS.toInt(),
+                        null
+                    )
                 }
             }
             if (isDriveActive) cameraUpdateHandler.postDelayed(this, CAMERA_TICK_MS)
         }
+    }
+
+    /**
+     * Flat (no tilt), heading-rotated camera, zoomed and offset so the car
+     * sits in the lower part of the screen with a look-ahead view toward
+     * the upcoming turn — rather than centering exactly on the car, which
+     * is how most nav apps actually achieve that look: the geographic
+     * *target* is a point pushed forward along the heading, not the car's
+     * own position.
+     */
+    private fun computeNavCameraPosition(carPosition: LatLng, bearing: Float): CameraPosition {
+        val path = currentPath
+        val lookaheadStep = path?.steps?.getOrNull(currentStepIndex + 1) ?: path?.steps?.getOrNull(currentStepIndex)
+        val rawLookaheadMeters = lookaheadStep?.let { distanceMetersBetween(carPosition, it.location) } ?: 250.0
+        val lookaheadMeters = rawLookaheadMeters.coerceIn(80.0, 600.0)
+
+        // Aim for the lookahead distance spanning roughly half the screen height.
+        val zoom = computeZoomForSpan(carPosition.latitude, lookaheadMeters / 0.5).coerceIn(15f, 20f)
+        val forwardOffsetMeters = lookaheadMeters * 0.45
+        val target = offsetPoint(carPosition, bearing, forwardOffsetMeters)
+
+        return CameraPosition.Builder()
+            .target(target)
+            .zoom(zoom)
+            .tilt(0f)
+            .bearing(bearing)
+            .build()
+    }
+
+    /** Zoom level at which [spanMeters] spans the full screen height at [latitude]. */
+    private fun computeZoomForSpan(latitude: Double, spanMeters: Double): Float {
+        val screenHeightPx = resources.displayMetrics.heightPixels.toDouble().coerceAtLeast(1.0)
+        val metersPerPixelWanted = (spanMeters / screenHeightPx).coerceAtLeast(0.01)
+        val zoom = ln(156543.03392 * cos(Math.toRadians(latitude)) / metersPerPixelWanted) / ln(2.0)
+        return zoom.toFloat()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -354,7 +390,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
      * real nav-app pucks use. It's a flat drawing, not a true 3D model —
      * the public Maps SDK for Android has no API for the latter (see README).
      */
-    private fun carBitmap(bodyColor: Int, sizePx: Int = 160): Bitmap {
+    private fun carBitmap(bodyColor: Int, sizePx: Int = 230): Bitmap {
         val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val cx = sizePx / 2f
@@ -447,10 +483,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private fun recenterCamera() {
         followingCamera = true
         recenterButton.visibility = View.GONE
-        currentLocation?.let { here ->
-            val cameraPosition = CameraPosition.Builder()
-                .target(here).zoom(18f).tilt(65f).bearing(deviceAzimuth).build()
-            map.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition))
+        currentLocation?.let { rawHere ->
+            val path = currentPath
+            val displayHere = if (path != null && path.polyline.size >= 2) snapToPolyline(rawHere, path.polyline) else rawHere
+            map.animateCamera(CameraUpdateFactory.newCameraPosition(computeNavCameraPosition(displayHere, deviceAzimuth)))
         }
     }
 
@@ -478,6 +514,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         turn2Text.visibility = View.GONE
         turn3Text.visibility = View.GONE
         map.isMyLocationEnabled = false
+        map.setMapStyle(MapStyleOptions(DARK_MAP_STYLE))
         followingCamera = true
 
         val radiusMeters = (radiusKm * 1000).toInt().coerceAtLeast(500)
@@ -521,8 +558,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         cameraUpdateHandler.removeCallbacks(cameraUpdateRunnable)
         mapPolyline?.remove()
         mapPolyline = null
-        mapPolylineOutline?.remove()
-        mapPolylineOutline = null
+        glowPolylines.forEach { it.remove() }
+        glowPolylines.clear()
         carMarker?.remove()
         carMarker = null
         roadGraph = null
@@ -533,6 +570,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         recenterButton.visibility = View.GONE
         muteButton.visibility = View.GONE
         controlsPanel.visibility = View.VISIBLE
+        if (::map.isInitialized) map.setMapStyle(null)
         if (hasLocationPermission()) map.isMyLocationEnabled = true
     }
 
@@ -657,24 +695,38 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun drawRoutePolyline(points: List<LatLng>) {
         mapPolyline?.remove()
-        mapPolylineOutline?.remove()
+        mapPolyline = null
+        glowPolylines.forEach { it.remove() }
+        glowPolylines.clear()
 
-        // Layered like Google Maps' route line: a soft light-blue outline
-        // under a brighter blue core, both wide enough to sit over the road.
-        mapPolylineOutline = map.addPolyline(
-            PolylineOptions()
-                .addAll(points)
-                .color(Color.parseColor("#B3C9F4"))
-                .width(26f)
-                .jointType(JointType.ROUND)
-                .startCap(RoundCap())
-                .endCap(RoundCap())
-        )
+        // Fake a neon glow: several wide, increasingly transparent lines
+        // stacked under a bright, narrow core — Polyline has no real blur,
+        // so this layering is what actually reads as "glowing" on screen.
+        val coreColor = Color.parseColor("#40C4FF")
+        val red = Color.red(coreColor)
+        val green = Color.green(coreColor)
+        val blue = Color.blue(coreColor)
+        val haloLayers = listOf(56f to 35, 42f to 80, 30f to 150)
+
+        for ((width, alpha) in haloLayers) {
+            glowPolylines.add(
+                map.addPolyline(
+                    PolylineOptions()
+                        .addAll(points)
+                        .color(Color.argb(alpha, red, green, blue))
+                        .width(width)
+                        .jointType(JointType.ROUND)
+                        .startCap(RoundCap())
+                        .endCap(RoundCap())
+                )
+            )
+        }
+
         mapPolyline = map.addPolyline(
             PolylineOptions()
                 .addAll(points)
-                .color(Color.parseColor("#4285F4"))
-                .width(16f)
+                .color(coreColor)
+                .width(18f)
                 .jointType(JointType.ROUND)
                 .startCap(RoundCap())
                 .endCap(RoundCap())

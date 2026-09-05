@@ -6,6 +6,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import kotlin.math.abs
+import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -109,6 +110,28 @@ private fun projectOntoSegment(p: LatLng, a: LatLng, b: LatLng): LatLng {
     val projX = ax + t * dx
     val projY = ay + t * dy
     return LatLng(projY, projX / k)
+}
+
+/**
+ * Returns the point [distanceMeters] away from [origin] along [bearingDegrees].
+ * Used to push the nav camera's look-at target ahead of the car along its
+ * heading, so the car itself renders lower on screen with more road ahead
+ * visible — the standard trick nav apps use instead of centering on the user.
+ */
+fun offsetPoint(origin: LatLng, bearingDegrees: Float, distanceMeters: Double): LatLng {
+    val earthRadiusMeters = 6371000.0
+    val bearingRad = Math.toRadians(bearingDegrees.toDouble())
+    val angularDistance = distanceMeters / earthRadiusMeters
+
+    val lat1 = Math.toRadians(origin.latitude)
+    val lon1 = Math.toRadians(origin.longitude)
+
+    val lat2 = asin(sin(lat1) * cos(angularDistance) + cos(lat1) * sin(angularDistance) * cos(bearingRad))
+    val lon2 = lon1 + atan2(
+        sin(bearingRad) * sin(angularDistance) * cos(lat1),
+        cos(angularDistance) - sin(lat1) * sin(lat2)
+    )
+    return LatLng(Math.toDegrees(lat2), Math.toDegrees(lon2))
 }
 
 
