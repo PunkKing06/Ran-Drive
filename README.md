@@ -32,64 +32,70 @@ wandering.
 9. **"⏹ Stop Drive"** ends the session and brings back the setup panel.
 
 ### Driving-mode view
-- **Flat, dark, heading-rotated camera**: no tilt/3D angle anymore — a flat,
-  top-down view rotated to match your compass heading, rendered in a dark
-  night-mode map style (applied only while a drive is active; the setup
-  screen keeps the normal map style).
-- **Look-ahead framing**: the camera doesn't center on the car — it aims at
-  a point pushed forward along your heading, and zoom is computed from the
-  distance to your next turn. Net effect: the car sits low on screen with
-  more of the road ahead visible, adjusting automatically as you get closer
-  to or farther from the next turn. Recentering re-engages this same
-  framing immediately.
-- **Bigger car avatar**: sized to visually read larger than the road
-  itself, same shaded/gradient/shadowed drawing as before, just bigger.
-- **Glowing route line**: `Polyline` has no real blur/glow capability, so
-  this fakes it — several wide, increasingly transparent lines stacked
-  under a bright, narrow core line, all in a neon blue. It's a genuine
-  glow *effect* achieved through layering, not a literal blur render.
+- **Flat, dark, road-aligned camera**: no tilt/3D angle — a flat, top-down
+  view rotated so "up" always matches the direction of the road you're on,
+  rendered in a dark night-mode map style (applied only while a drive is
+  active; the setup screen keeps the normal map style).
+- **Heading comes from the road itself, not the phone's compass.** Earlier
+  versions used the device's compass sensor for rotation, but that caused
+  real problems: compass readings jump around from magnetic interference or
+  a phone mounted at an angle that doesn't match the car's actual direction
+  of travel, which both disoriented the view and — since the camera framing
+  math depended on that same jittery value — could momentarily push the car
+  marker out of frame after tapping recenter. Now the bearing is derived
+  directly from the road geometry: whichever segment of the current planned
+  path the car is nearest to, that segment's own bearing is used for both
+  the camera and the car marker's rotation. It only changes when the car
+  actually moves onto a different segment, so it's stable and always
+  literally parallel to the road.
+- **Car sits low on screen via map padding**, not a manually-offset camera
+  target. `GoogleMap.setPadding()` — Google's own documented mechanism for
+  this — shifts where the camera's target renders on screen; applying
+  generous bottom padding while a drive is active means a camera simply
+  targeting the car's own position still renders that position low on
+  screen, with the padded-away space above revealing more of the road
+  ahead. This is simpler and more robust than computing a manual forward
+  offset (which is what caused the "car not in view" bug above).
+- **Recenter** re-engages the same framing immediately: same fixed zoom,
+  same padding, same road-derived bearing.
+- **Arrow puck avatar, on by default.** After feedback that the drawn car
+  icon still didn't read as a convincing car, the default avatar is now the
+  classic rounded-chevron navigation arrow — the same basic shape Google
+  Maps' own default location puck uses — solid color with a white outline
+  and a soft drop shadow. The car icon from before is still available as an
+  alternate option in the hamburger drawer, alongside the arrow.
+  **Both are still flat 2D drawings, not true 3D models** — the public
+  Google Maps SDK for Android has no API for rendering an actual 3D vehicle
+  as a marker; the rotating 3D cars in the real Google Maps/Waze apps are
+  rendered by Google's own internal engine, not something exposed to
+  outside developers. A more realistic look than either of these drawn
+  icons would mean supplying actual car sprite/render image assets to swap
+  in as the marker bitmap — happy to wire that in if you get some.
+- **Bigger avatar**: sized to visually read larger than the road itself.
+- **Clean, solid Maps-style route line**: a soft light-blue outline under a
+  brighter blue core, wide enough to visually cover the street — matching
+  Google Maps' own route highlighting, not a glowing/neon effect (an
+  earlier version tried a multi-layer transparent "glow" stack; this is
+  simpler and closer to how Maps itself actually looks).
 - **Road-snapped position**: unchanged from before — the marker's on-screen
   position is projected onto the nearest point actually on the current
   planned road polyline, so it stays centered on the street even with
   noisy GPS (indoors, multipath, etc). The *navigation logic*
   (arrival/deviation detection) still uses your true raw GPS position.
-- **Car avatar**: a properly drawn car shape (not an emoji) — correct
-  body, gradient shading, headlights/taillights so front/back is
-  unambiguous, and a soft blurred drop shadow underneath.
-  **This is a flat 2D drawing, not a true 3D model** — the public Google
-  Maps SDK for Android (the only Maps API available to third-party apps)
-  has no API for rendering an actual 3D vehicle as a marker; the rotating
-  3D cars in the real Google Maps/Waze apps are rendered by Google's own
-  internal engine, not something exposed to outside developers. If you
-  want a more realistic look than this drawn icon, the real path forward
-  is supplying actual car sprite/render image assets to swap in as the
-  marker bitmap — happy to wire that in if you get some.
-- **Car color picker**: the hamburger drawer lets you choose a body color
-  per "car type" (Sedan, SUV, Sports Car, Taxi, Police Car, Pickup Truck) —
-  shown as a colored swatch next to each name.
-- **Recenter**: if you pan or zoom the map manually, the camera stops
-  auto-following and a recenter button appears — tapping it snaps straight
-  back into the look-ahead framing described above.
 
 **Honest limitations on this part:**
-- The car marker is a flat, procedurally-drawn 2D bitmap — see above for
-  why true 3D isn't achievable via the public Maps SDK.
-- The look-ahead zoom/offset math is a straightforward geometric estimate
-  (distance-to-next-turn mapped to a zoom level, target pushed forward
-  along heading) — it's not literally "fit exactly 2 turns in frame," just
-  a good approximation of that same look, tunable via the constants noted
-  below.
-- The rotation-vector sensor is present on effectively all modern Android
-  phones, but on the rare device without one, the car marker/camera simply
-  won't rotate (no crash — `startCompassUpdates()` just no-ops if the
-  sensor is unavailable).
-- Compass readings can be temporarily thrown off by nearby magnetic
-  interference (common near large metal objects) — same real-world caveat
-  any compass-based app has.
-- Road-snapping projects onto the *currently planned* path polyline, not
-  the whole fetched road graph — if you're genuinely off that path (which
-  the app treats as normal, see below), the snap briefly follows whatever
-  the nearest segment of the old path is until a new path is generated.
+- Both avatar options are flat, procedurally-drawn 2D bitmaps — see above
+  for why true 3D isn't achievable via the public Maps SDK.
+- Road-snapping and road-derived bearing both project onto the *currently
+  planned* path polyline, not the whole fetched road graph — if you're
+  genuinely off that path (which the app treats as normal, see below), the
+  snap briefly follows whatever the nearest segment of the old path is
+  until a new path is generated.
+- The bottom-padding fraction and fixed nav zoom are constants
+  (`BOTTOM_PADDING_FRACTION`, `NAV_ZOOM` at the top of `MainActivity.kt`) —
+  not dynamically computed from how far away your next turn is. Simpler
+  and more predictable than the earlier lookahead-zoom approach, at the
+  cost of not automatically zooming out further for a farther-away turn.
 
 ### Genuinely random turn-by-turn (not a route to a point)
 Earlier versions of this app either launched Google Maps to one random
@@ -157,13 +163,11 @@ While a drive is active, the app tracks your live GPS position and:
   casual drive.
 - Tuning constants live at the top of `MainActivity.kt`: `DEVIATION_METERS`
   (60m), `ARRIVAL_METERS` (30m), `WARNING_METERS` (150m), `LOW_STEPS_THRESHOLD`
-  (3), `REFETCH_FRACTION` (0.7). The random walk's look-ahead depth
-  (`desiredHops`, default 12 intersections) is a parameter on
-  `OsmRoadGraph.buildRandomPath()`. The camera's look-ahead framing lives in
-  `computeNavCameraPosition()` — the 0.5 divisor controls how much of the
-  screen height the distance-to-next-turn should span, and 0.45 controls
-  how far forward (as a fraction of that distance) the camera target is
-  pushed to keep the car low on screen.
+  (3), `REFETCH_FRACTION` (0.7), `NAV_ZOOM` (18.5 — the fixed driving-mode
+  zoom level), `BOTTOM_PADDING_FRACTION` (0.55 — how much of the screen
+  height is reserved below the car via map padding). The random walk's
+  look-ahead depth (`desiredHops`, default 12 intersections) is a parameter
+  on `OsmRoadGraph.buildRandomPath()`.
 
 ### Nearest toilet
 Google's Places data doesn't actually have a filterable "public restroom"

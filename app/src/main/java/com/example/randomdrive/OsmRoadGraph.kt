@@ -89,6 +89,31 @@ fun snapToPolyline(p: LatLng, polyline: List<LatLng>): LatLng {
     return best
 }
 
+/**
+ * Bearing of whichever segment of [polyline] is currently closest to [p] —
+ * a stable heading source derived from the road itself, not the phone's
+ * compass. Compass-based rotation can jump around (magnetic interference,
+ * a mounted phone not aligned with the direction of travel) which made the
+ * camera and car marker jitter; this is always exactly parallel to the
+ * road you're actually on.
+ */
+fun bearingAlongPolyline(p: LatLng, polyline: List<LatLng>): Float {
+    if (polyline.size < 2) return 0f
+    var bestDist = Double.MAX_VALUE
+    var bestBearing = 0.0
+    for (i in 0 until polyline.size - 1) {
+        val a = polyline[i]
+        val b = polyline[i + 1]
+        val projected = projectOntoSegment(p, a, b)
+        val d = distanceMetersBetween(p, projected)
+        if (d < bestDist) {
+            bestDist = d
+            bestBearing = bearingBetween(a, b)
+        }
+    }
+    return bestBearing.toFloat()
+}
+
 private fun projectOntoSegment(p: LatLng, a: LatLng, b: LatLng): LatLng {
     // Local planar approximation: scale longitude by cos(latitude) so x/y
     // are in comparable units near this segment, project, then unscale.

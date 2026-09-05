@@ -9,13 +9,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
-import android.graphics.drawable.GradientDrawable
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.location.Location
 import android.net.Uri
 import android.os.Bundle
@@ -23,8 +19,8 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.view.Gravity
-import android.view.Surface
 import android.view.View
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
@@ -60,8 +56,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
-import kotlin.math.cos
-import kotlin.math.ln
 
 class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -72,22 +66,31 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         private const val LOW_STEPS_THRESHOLD = 3
         private const val REFETCH_FRACTION = 0.7
         private const val CAMERA_TICK_MS = 250L
+        private const val NAV_ZOOM = 18.5f
+        // Fraction of screen height reserved below the car (via map padding)
+        // so it sits low on screen with more road visible ahead — same
+        // technique real nav apps use.
+        private const val BOTTOM_PADDING_FRACTION = 0.55
     }
 
-    private val carOptions: List<Pair<Int, String>> by lazy {
+    private sealed class AvatarStyle {
+        data class Arrow(val color: Int) : AvatarStyle()
+        data class Car(val color: Int) : AvatarStyle()
+    }
+
+    private val avatarOptions: List<Pair<AvatarStyle, String>> by lazy {
         listOf(
-            Color.parseColor("#1A73E8") to "Sedan",
-            Color.parseColor("#263238") to "SUV",
-            Color.parseColor("#D32F2F") to "Sports Car",
-            Color.parseColor("#FBC02D") to "Taxi",
-            Color.parseColor("#37474F") to "Police Car",
-            Color.parseColor("#607D8B") to "Pickup Truck"
+            AvatarStyle.Arrow(Color.parseColor("#4FC3F7")) to "Arrow (Default)",
+            AvatarStyle.Car(Color.parseColor("#1A73E8")) to "Sedan",
+            AvatarStyle.Car(Color.parseColor("#263238")) to "SUV",
+            AvatarStyle.Car(Color.parseColor("#D32F2F")) to "Sports Car",
+            AvatarStyle.Car(Color.parseColor("#FBC02D")) to "Taxi",
+            AvatarStyle.Car(Color.parseColor("#607D8B")) to "Pickup Truck"
         )
     }
 
     private lateinit var map: GoogleMap
     private lateinit var fusedLocationClient: FusedLocationProviderClient
-    private lateinit var sensorManager: SensorManager
 
     private lateinit var drawerLayout: DrawerLayout
     private lateinit var radiusLabel: TextView
@@ -119,13 +122,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private var routeFetchInProgress = false
     private var hasWarnedForCurrentStep = false
     private var mapPolyline: Polyline? = null
-    private val glowPolylines = mutableListOf<Polyline>()
+    private var mapPolylineOutline: Polyline? = null
 
-    // Car avatar + camera
+    // Avatar + camera
     private var carMarker: Marker? = null
-    private var selectedCarColor = Color.parseColor("#1A73E8")
+    private var selectedAvatar: AvatarStyle = AvatarStyle.Arrow(Color.parseColor("#4FC3F7"))
     private var followingCamera = true
-    private var deviceAzimuth = 0f
+    private var lastKnownBearing = 0f
 
     private val locationPermissionRequestCode = 1001
 
@@ -135,90 +138,45 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    private val sensorEventListener = object : SensorEventListener {
-        override fun onSensorChanged(event: SensorEvent) {
-            if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
-            val rotationMatrix = FloatArray(9)
-            SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-
-            @Suppress("DEPRECATION")
-            val rotation = windowManager.defaultDisplay.rotation
-            val (worldAxisX, worldAxisZ) = when (rotation) {
-                Surface.ROTATION_90 -> SensorManager.AXIS_Y to SensorManager.AXIS_MINUS_X
-                Surface.ROTATION_180 -> SensorManager.AXIS_MINUS_X to SensorManager.AXIS_MINUS_Y
-                Surface.ROTATION_270 -> SensorManager.AXIS_MINUS_Y to SensorManager.AXIS_X
-                else -> SensorManager.AXIS_X to SensorManager.AXIS_Y
-            }
-            val adjustedMatrix = FloatArray(9)
-            SensorManager.remapCoordinateSystem(rotationMatrix, worldAxisX, worldAxisZ, adjustedMatrix)
-
-            val orientation = FloatArray(3)
-            SensorManager.getOrientation(adjustedMatrix, orientation)
-            deviceAzimuth = ((Math.toDegrees(orientation[0].toDouble()) + 360.0) % 360.0).toFloat()
-        }
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-    }
-
     // Drives the car marker + camera at a smooth, steady rate — decoupled
-    // from GPS location ticks (which only arrive every second or two) so
-    // rotation tracks the phone's facing direction responsively.
+    // from GPS location ticks (which only arrive every second or two).
+    // Bearing comes from the road geometry itself (the segment the car is
+    // currently nearest to), not the device compass — compass readings can
+    // jump around (magnetic interference, a phone mount not aligned with
+    // the direction of travel), which caused exactly the disorientation and
+    // "car goes out of frame" issue a device-orientation source has. A
+    // road-derived bearing only changes when the car actually moves to a
+    // different segment, so it's stable and always literally parallel to
+    // the road you're on.
     private val cameraUpdateHandler = Handler(Looper.getMainLooper())
     private val cameraUpdateRunnable = object : Runnable {
         override fun run() {
             currentLocation?.let { rawHere ->
                 val path = currentPath
-                // Snap to the actual road line so the car sits centered on
-                // the street regardless of GPS noise (indoors, multipath, etc).
-                val displayHere = if (path != null && path.polyline.size >= 2) {
-                    snapToPolyline(rawHere, path.polyline)
-                } else rawHere
+                val displayHere: LatLng
+                val bearing: Float
+                if (path != null && path.polyline.size >= 2) {
+                    displayHere = snapToPolyline(rawHere, path.polyline)
+                    bearing = bearingAlongPolyline(rawHere, path.polyline)
+                } else {
+                    displayHere = rawHere
+                    bearing = lastKnownBearing
+                }
+                lastKnownBearing = bearing
 
-                updateCarMarker(displayHere, deviceAzimuth)
+                updateCarMarker(displayHere, bearing)
                 if (followingCamera) {
-                    map.animateCamera(
-                        CameraUpdateFactory.newCameraPosition(computeNavCameraPosition(displayHere, deviceAzimuth)),
-                        CAMERA_TICK_MS.toInt(),
-                        null
-                    )
+                    val cameraPosition = CameraPosition.Builder()
+                        .target(displayHere)
+                        .zoom(NAV_ZOOM)
+                        .tilt(0f)
+                        .bearing(bearing)
+                        .build()
+                    map.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition), CAMERA_TICK_MS.toInt(), null)
                 }
             }
             if (isDriveActive) cameraUpdateHandler.postDelayed(this, CAMERA_TICK_MS)
         }
-    }
-
-    /**
-     * Flat (no tilt), heading-rotated camera, zoomed and offset so the car
-     * sits in the lower part of the screen with a look-ahead view toward
-     * the upcoming turn — rather than centering exactly on the car, which
-     * is how most nav apps actually achieve that look: the geographic
-     * *target* is a point pushed forward along the heading, not the car's
-     * own position.
-     */
-    private fun computeNavCameraPosition(carPosition: LatLng, bearing: Float): CameraPosition {
-        val path = currentPath
-        val lookaheadStep = path?.steps?.getOrNull(currentStepIndex + 1) ?: path?.steps?.getOrNull(currentStepIndex)
-        val rawLookaheadMeters = lookaheadStep?.let { distanceMetersBetween(carPosition, it.location) } ?: 250.0
-        val lookaheadMeters = rawLookaheadMeters.coerceIn(80.0, 600.0)
-
-        // Aim for the lookahead distance spanning roughly half the screen height.
-        val zoom = computeZoomForSpan(carPosition.latitude, lookaheadMeters / 0.5).coerceIn(15f, 20f)
-        val forwardOffsetMeters = lookaheadMeters * 0.45
-        val target = offsetPoint(carPosition, bearing, forwardOffsetMeters)
-
-        return CameraPosition.Builder()
-            .target(target)
-            .zoom(zoom)
-            .tilt(0f)
-            .bearing(bearing)
-            .build()
-    }
-
-    /** Zoom level at which [spanMeters] spans the full screen height at [latitude]. */
-    private fun computeZoomForSpan(latitude: Double, spanMeters: Double): Float {
-        val screenHeightPx = resources.displayMetrics.heightPixels.toDouble().coerceAtLeast(1.0)
-        val metersPerPixelWanted = (spanMeters / screenHeightPx).coerceAtLeast(0.01)
-        val zoom = ln(156543.03392 * cos(Math.toRadians(latitude)) / metersPerPixelWanted) / ln(2.0)
-        return zoom.toFloat()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -226,7 +184,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         setContentView(R.layout.activity_main)
 
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
 
         val mapFragment = supportFragmentManager.findFragmentById(R.id.map) as SupportMapFragment
         mapFragment.getMapAsync(this)
@@ -293,7 +250,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         super.onDestroy()
         if (isDriveActive) {
             stopDriveLocationUpdates()
-            sensorManager.unregisterListener(sensorEventListener)
             cameraUpdateHandler.removeCallbacks(cameraUpdateRunnable)
         }
         textToSpeech?.stop()
@@ -341,11 +297,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    // ---------- Hamburger drawer: car avatar picker ----------
+    // ---------- Hamburger drawer: avatar picker ----------
 
     private fun setupCarOptionsMenu() {
         carOptionsContainer.removeAllViews()
-        for ((color, label) in carOptions) {
+        for ((style, label) in avatarOptions) {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -353,13 +309,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 isClickable = true
                 isFocusable = true
             }
-            val swatch = View(this).apply {
-                val size = dpToPx(28)
-                layoutParams = LinearLayout.LayoutParams(size, size)
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(color)
-                }
+            val previewSize = dpToPx(32)
+            val swatch = ImageView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(previewSize, previewSize)
+                setImageBitmap(Bitmap.createScaledBitmap(bitmapFor(style), previewSize, previewSize, true))
             }
             val labelView = TextView(this).apply {
                 text = label
@@ -369,8 +322,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             row.addView(swatch)
             row.addView(labelView)
             row.setOnClickListener {
-                selectedCarColor = color
-                carMarker?.setIcon(BitmapDescriptorFactory.fromBitmap(carBitmap(color)))
+                selectedAvatar = style
+                carMarker?.setIcon(BitmapDescriptorFactory.fromBitmap(bitmapFor(style)))
                 drawerLayout.closeDrawer(GravityCompat.START)
             }
             carOptionsContainer.addView(row)
@@ -379,16 +332,63 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).toInt()
 
+    private fun bitmapFor(style: AvatarStyle): Bitmap = when (style) {
+        is AvatarStyle.Arrow -> arrowBitmap(style.color)
+        is AvatarStyle.Car -> carBitmap(style.color)
+    }
+
+    /**
+     * The classic rounded-chevron navigation puck (like Google Maps' own
+     * default location arrow) — simpler and more legible than a drawn car,
+     * and what Maps itself actually defaults to.
+     */
+    private fun arrowBitmap(color: Int, sizePx: Int = 240): Bitmap {
+        val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val cx = sizePx / 2f
+        val cy = sizePx / 2f
+        val radius = sizePx * 0.34f
+
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = Color.argb(90, 0, 0, 0)
+            maskFilter = BlurMaskFilter(sizePx * 0.07f, BlurMaskFilter.Blur.NORMAL)
+        }
+        canvas.drawOval(
+            RectF(cx - radius, cy - radius * 0.5f, cx + radius, cy + radius * 1.6f),
+            shadowPaint
+        )
+
+        val path = Path().apply {
+            moveTo(cx, cy - radius * 1.15f)
+            lineTo(cx + radius * 0.95f, cy + radius * 0.8f)
+            quadTo(cx, cy + radius * 0.35f, cx - radius * 0.95f, cy + radius * 0.8f)
+            close()
+        }
+
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
+            style = Paint.Style.FILL
+        }
+        canvas.drawPath(path, fillPaint)
+
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = sizePx * 0.045f
+        }
+        canvas.drawPath(path, strokePaint)
+
+        return bitmap
+    }
+
     /**
      * Draws a shaded, correctly-oriented car icon (front = top of the
-     * bitmap, matching marker.rotation = heading) rather than a rotating
-     * emoji glyph — proper body shape, a light-to-dark gradient for a
-     * glossy look, headlights/taillights so the front is unambiguous, and
-     * a soft blurred drop shadow underneath. The shadow is what actually
-     * sells the "sitting above the ground" look once the tilted camera
-     * renders this as a flat ground-anchored marker — the same basic trick
-     * real nav-app pucks use. It's a flat drawing, not a true 3D model —
-     * the public Maps SDK for Android has no API for the latter (see README).
+     * bitmap, matching marker.rotation = heading) — proper body shape, a
+     * light-to-dark gradient for a glossy look, headlights/taillights so
+     * the front is unambiguous, and a soft blurred drop shadow underneath.
+     * It's a flat drawing, not a true 3D model — the public Maps SDK for
+     * Android has no API for the latter (see README). Kept as an alternate
+     * option; the arrow puck above is the default.
      */
     private fun carBitmap(bodyColor: Int, sizePx: Int = 230): Bitmap {
         val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
@@ -426,8 +426,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
         canvas.drawRoundRect(bodyRect, corner, corner, outlinePaint)
 
-        // Windshield near the "front" (top of the bitmap) — matches the
-        // rotation=bearing convention so it always faces the direction of travel.
         val windshieldPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(210, 30, 40, 55) }
         val windshieldRect = RectF(
             bodyRect.left + carWidth * 0.14f, bodyRect.top + carHeight * 0.12f,
@@ -467,7 +465,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             carMarker = map.addMarker(
                 MarkerOptions()
                     .position(position)
-                    .icon(BitmapDescriptorFactory.fromBitmap(carBitmap(selectedCarColor)))
+                    .icon(BitmapDescriptorFactory.fromBitmap(bitmapFor(selectedAvatar)))
                     .anchor(0.5f, 0.5f)
                     .flat(true)
                     .rotation(bearing)
@@ -485,8 +483,19 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         recenterButton.visibility = View.GONE
         currentLocation?.let { rawHere ->
             val path = currentPath
-            val displayHere = if (path != null && path.polyline.size >= 2) snapToPolyline(rawHere, path.polyline) else rawHere
-            map.animateCamera(CameraUpdateFactory.newCameraPosition(computeNavCameraPosition(displayHere, deviceAzimuth)))
+            val displayHere: LatLng
+            val bearing: Float
+            if (path != null && path.polyline.size >= 2) {
+                displayHere = snapToPolyline(rawHere, path.polyline)
+                bearing = bearingAlongPolyline(rawHere, path.polyline)
+            } else {
+                displayHere = rawHere
+                bearing = lastKnownBearing
+            }
+            lastKnownBearing = bearing
+            val cameraPosition = CameraPosition.Builder()
+                .target(displayHere).zoom(NAV_ZOOM).tilt(0f).bearing(bearing).build()
+            map.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition))
         }
     }
 
@@ -515,6 +524,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         turn3Text.visibility = View.GONE
         map.isMyLocationEnabled = false
         map.setMapStyle(MapStyleOptions(DARK_MAP_STYLE))
+        val bottomPaddingPx = (resources.displayMetrics.heightPixels * BOTTOM_PADDING_FRACTION).toInt()
+        map.setPadding(0, 0, 0, bottomPaddingPx)
         followingCamera = true
 
         val radiusMeters = (radiusKm * 1000).toInt().coerceAtLeast(500)
@@ -545,7 +556,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 }
                 applyNewPath(path, announce = true)
                 startDriveLocationUpdates()
-                startCompassUpdates()
                 cameraUpdateHandler.post(cameraUpdateRunnable)
             }
         }.start()
@@ -554,12 +564,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private fun stopDrive() {
         isDriveActive = false
         stopDriveLocationUpdates()
-        sensorManager.unregisterListener(sensorEventListener)
         cameraUpdateHandler.removeCallbacks(cameraUpdateRunnable)
         mapPolyline?.remove()
         mapPolyline = null
-        glowPolylines.forEach { it.remove() }
-        glowPolylines.clear()
+        mapPolylineOutline?.remove()
+        mapPolylineOutline = null
         carMarker?.remove()
         carMarker = null
         roadGraph = null
@@ -570,7 +579,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         recenterButton.visibility = View.GONE
         muteButton.visibility = View.GONE
         controlsPanel.visibility = View.VISIBLE
-        if (::map.isInitialized) map.setMapStyle(null)
+        if (::map.isInitialized) {
+            map.setMapStyle(null)
+            map.setPadding(0, 0, 0, 0)
+        }
         if (hasLocationPermission()) map.isMyLocationEnabled = true
     }
 
@@ -584,13 +596,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun stopDriveLocationUpdates() {
         fusedLocationClient.removeLocationUpdates(driveLocationCallback)
-    }
-
-    private fun startCompassUpdates() {
-        val rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-        if (rotationVectorSensor != null) {
-            sensorManager.registerListener(sensorEventListener, rotationVectorSensor, SensorManager.SENSOR_DELAY_GAME)
-        }
     }
 
     // ---------- Live driving loop ----------
@@ -693,40 +698,30 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
+    /**
+     * Clean, solid Maps-style route line: a soft light-blue outline under a
+     * brighter blue core, both wide enough to visually cover the street —
+     * matching Google Maps' own route highlighting rather than a glowing
+     * neon effect.
+     */
     private fun drawRoutePolyline(points: List<LatLng>) {
         mapPolyline?.remove()
-        mapPolyline = null
-        glowPolylines.forEach { it.remove() }
-        glowPolylines.clear()
+        mapPolylineOutline?.remove()
 
-        // Fake a neon glow: several wide, increasingly transparent lines
-        // stacked under a bright, narrow core — Polyline has no real blur,
-        // so this layering is what actually reads as "glowing" on screen.
-        val coreColor = Color.parseColor("#40C4FF")
-        val red = Color.red(coreColor)
-        val green = Color.green(coreColor)
-        val blue = Color.blue(coreColor)
-        val haloLayers = listOf(56f to 35, 42f to 80, 30f to 150)
-
-        for ((width, alpha) in haloLayers) {
-            glowPolylines.add(
-                map.addPolyline(
-                    PolylineOptions()
-                        .addAll(points)
-                        .color(Color.argb(alpha, red, green, blue))
-                        .width(width)
-                        .jointType(JointType.ROUND)
-                        .startCap(RoundCap())
-                        .endCap(RoundCap())
-                )
-            )
-        }
-
+        mapPolylineOutline = map.addPolyline(
+            PolylineOptions()
+                .addAll(points)
+                .color(Color.parseColor("#8AB4F8"))
+                .width(34f)
+                .jointType(JointType.ROUND)
+                .startCap(RoundCap())
+                .endCap(RoundCap())
+        )
         mapPolyline = map.addPolyline(
             PolylineOptions()
                 .addAll(points)
-                .color(coreColor)
-                .width(18f)
+                .color(Color.parseColor("#4285F4"))
+                .width(22f)
                 .jointType(JointType.ROUND)
                 .startCap(RoundCap())
                 .endCap(RoundCap())
