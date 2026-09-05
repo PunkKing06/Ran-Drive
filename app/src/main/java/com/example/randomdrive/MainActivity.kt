@@ -67,10 +67,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         private const val REFETCH_FRACTION = 0.7
         private const val CAMERA_TICK_MS = 250L
         private const val NAV_ZOOM = 18.5f
-        // Fraction of screen height reserved below the car (via map padding)
-        // so it sits low on screen with more road visible ahead — same
-        // technique real nav apps use.
-        private const val BOTTOM_PADDING_FRACTION = 0.55
+        // Fraction of screen height reserved above the car (via top map
+        // padding) so it sits low on screen with more road visible ahead —
+        // padding shrinks the "visible" region away from whichever edge you
+        // pad, and the camera target centers within what's left, so top
+        // padding is what pushes the target (and the car) down toward the
+        // bottom of the screen.
+        private const val TOP_PADDING_FRACTION = 0.55
     }
 
     private sealed class AvatarStyle {
@@ -524,8 +527,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         turn3Text.visibility = View.GONE
         map.isMyLocationEnabled = false
         map.setMapStyle(MapStyleOptions(DARK_MAP_STYLE))
-        val bottomPaddingPx = (resources.displayMetrics.heightPixels * BOTTOM_PADDING_FRACTION).toInt()
-        map.setPadding(0, 0, 0, bottomPaddingPx)
+        val topPaddingPx = (resources.displayMetrics.heightPixels * TOP_PADDING_FRACTION).toInt()
+        map.setPadding(0, topPaddingPx, 0, 0)
         followingCamera = true
 
         val radiusMeters = (radiusKm * 1000).toInt().coerceAtLeast(500)

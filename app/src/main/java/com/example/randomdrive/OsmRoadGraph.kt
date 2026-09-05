@@ -174,7 +174,7 @@ object OsmRoadGraph {
         return try {
             val query = "[out:json][timeout:20];" +
                 "way[\"highway\"~\"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|" +
-                "secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street|service)$\"]" +
+                "secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street)$\"]" +
                 "(around:$radiusMeters,${center.latitude},${center.longitude});(._;>;);out body;"
             val url = URL("https://overpass-api.de/api/interpreter?data=" + URLEncoder.encode(query, "UTF-8"))
             val connection = url.openConnection() as HttpURLConnection
@@ -209,6 +209,40 @@ object OsmRoadGraph {
                             "-1" -> -1
                             else -> 0
                         }
+
+                        // Skip ways closed to general car traffic — not just
+                        // "no"/"private", but any access tier that implies
+                        // you need a specific reason to be there (permit,
+                        // customers only, deliveries, farm/forestry access,
+                        // or "destination" — which technically allows driving
+                        // in if that's where you're headed, but this app has
+                        // no real destination, so it doesn't apply here).
+                        val restrictedAccessValues = setOf(
+                            "no", "private", "permit", "customers", "destination", "delivery", "agricultural", "forestry"
+                        )
+                        val accessTag = tags?.optString("access", "") ?: ""
+                        val motorVehicleTag = tags?.optString("motor_vehicle", "") ?: ""
+                        val vehicleTag = tags?.optString("vehicle", "") ?: ""
+                        val blockedByAccess = accessTag in restrictedAccessValues ||
+                            motorVehicleTag in restrictedAccessValues ||
+                            vehicleTag in restrictedAccessValues
+
+                        // Skip roads too narrow for two cars to pass: an
+                        // explicit width tag under ~3.5m, a single lane on a
+                        // two-way road (the classic single-track-with-passing-
+                        // places pattern), or an explicit passing_places tag
+                        // some mappers use for exactly this case.
+                        val widthMeters = (tags?.optString("width", "") ?: "")
+                            .replace(Regex("[^0-9.]"), "")
+                            .toDoubleOrNull()
+                        val tooNarrowByWidth = widthMeters != null && widthMeters < 3.5
+                        val lanesCount = (tags?.optString("lanes", "") ?: "").toIntOrNull()
+                        val singleLaneTwoWay = lanesCount == 1 && oneway == 0
+                        val markedPassingPlaces = (tags?.optString("passing_places", "") ?: "") == "yes"
+                        val tooNarrow = tooNarrowByWidth || singleLaneTwoWay || markedPassingPlaces
+
+                        if (blockedByAccess || tooNarrow) continue
+
                         ways.add(WayInfo(ids, name, oneway))
                     }
                 }
